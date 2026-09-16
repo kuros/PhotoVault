@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .. import config as configmod
+from .. import duplicates
 from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
@@ -121,6 +122,12 @@ class VaultHandler(BaseHTTPRequestHandler):
                 return self._json({"cleared": thumbs.clear_cache()})
             if url.path == "/api/config":
                 return self._save_config(body)
+            if url.path == "/api/duplicates/decide":
+                decisions = body.get("decisions")
+                if not isinstance(decisions, dict):
+                    return self._json({"error": "expected a 'decisions' object"}, 400)
+                n = duplicates.decide(self.catalog, decisions)
+                return self._json({"recorded": n})
         except TypeError as exc:
             return self._json({"error": f"bad parameters: {exc}"}, 400)
         except Exception as exc:
@@ -174,6 +181,31 @@ class VaultHandler(BaseHTTPRequestHandler):
                 "shard_copies_needed": p.shard_copies_needed,
                 "unplaceable": len(p.unplaceable),
                 "replicas": [{"name": n, **s} for n, s in p.per_replica.items()],
+            })
+
+        if name == "duplicates":
+            threshold = max(0, min(16, int(q.get("threshold",
+                                                 duplicates.DEFAULT_THRESHOLD))))
+            groups = duplicates.find_groups(self.cfg, cat, threshold=threshold)
+            limit = int(q.get("limit", 60))
+            offset = int(q.get("offset", 0))
+            page = groups[offset:offset + limit]
+            pending = int(cat.db.execute(
+                "SELECT COUNT(*) n FROM asset WHERE phash IS NULL "
+                "AND media_kind='image'").fetchone()["n"])
+            return self._json({
+                "total_groups": len(groups),
+                "recoverable_bytes": sum(g.wasted_bytes for g in groups),
+                "unanalysed": pending,
+                "threshold": threshold,
+                "can_analyse": __import__("photovault.perceptual",
+                                          fromlist=["x"]).available(),
+                "groups": [
+                    {"id": g.id, "suggested_keep": g.suggested_keep,
+                     "wasted_bytes": g.wasted_bytes,
+                     "members": [vars(m) for m in g.members]}
+                    for g in page
+                ],
             })
 
         if name == "timeline":

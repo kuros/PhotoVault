@@ -218,9 +218,6 @@ written.
 
 ## What's deliberately not built
 
-- **No perceptual duplicate detection.** Finding *visually similar* photos (different
-  resolutions, re-compressed copies) is a genuinely useful feature and a much harder
-  problem. Exact-content dedup is the 90% case and is exactly correct.
 - **No web UI.** The files are plain folders; Finder, Explorer and Apple Photos already
   browse them well.
 - **No mobile replicas.** Explained in the README — iOS background execution limits
@@ -496,3 +493,58 @@ Two smaller decisions that came out of running it rather than writing it:
 > to miss*, not by how much it shows. The redundancy numbers were already available from
 > `status`; what was missing was putting the one actionable line where a human could not
 > scroll past it.
+
+
+---
+
+## Decision 13: two kinds of "same photo"
+
+Content hashing answers *are these the same bytes?* and collapses exact copies at ingest
+for free. It says nothing about a photo re-compressed by a messaging app — different
+bytes, and to a content hash, an unrelated file.
+
+dHash answers the other question. Shrink to 9×8 grey pixels, record for each adjacent
+pair whether the left is brighter, and you have 64 bits describing the *shape* of the
+brightness gradient. Re-compression and resizing barely touch it because it encodes no
+pixel values at all.
+
+The two hashes are not competitors. Content hashing is exact and load-bearing —
+identity, integrity, repair all rest on it. Perceptual hashing is a fuzzy *hint*, used
+only to put candidates in front of a human. Keeping that distinction sharp is what makes
+the feature safe: nothing in the replication or verification path ever consults a dHash.
+
+> **The general lesson:** when you add a second notion of identity to a system, be
+> explicit about which one is authoritative. A fuzzy match that quietly leaks into the
+> exact-match paths is how "find similar photos" becomes "lost photos".
+
+### Scaling the comparison
+
+Comparing every pair is O(n²) — about 20 billion comparisons for 200k photos. Instead
+each hash is split into 8 bands of 8 bits and bucketed by band. By pigeonhole, two hashes
+differing in at most 7 bits must agree *exactly* on at least one band, so only same-bucket
+pairs need checking. Exact for the thresholds in use, and linear in practice.
+
+Buckets with hundreds of members are skipped: that is a near-uniform image class, not a
+duplicate set, and clustering it would propose mass deletion. Hashes that are nearly all
+zeros or all ones are excluded for the same reason — a blank wall matches every other
+blank wall perfectly while having nothing in common with it.
+
+### Deletion is gated on re-read bytes, like everything else
+
+`duplicates apply` is the fourth destructive operation, and it reuses the rule the other
+three established: **count only copies re-read and re-hashed right now.** Before removing
+a duplicate, the photo being kept must reach `min_copies` verified copies.
+
+The failure this prevents is specific and quiet: you delete a duplicate because the
+catalog says its twin is safely backed up, but that twin's only drive has silently
+rotted. You have then destroyed the last good version of that photo, and the catalog
+still claims everything is fine.
+
+Two further refusals, both about the user's intent rather than the data:
+
+- **Nothing is deleted without an explicit per-group decision.** The suggested keeper is
+  only ever a suggestion; it is never acted on by itself.
+- **A group is never emptied.** If every member is marked for deletion, none are.
+
+> **The general lesson:** a destructive feature's design is mostly its refusals. The
+> deletion itself is three lines.

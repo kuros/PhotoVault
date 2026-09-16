@@ -18,7 +18,8 @@ const state = {
 };
 
 const PAGE_TITLES = { photos: 'Photos', health: 'Health',
-                      activity: 'Activity', settings: 'Settings' };
+                      activity: 'Activity', duplicates: 'Duplicates',
+                      settings: 'Settings' };
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -183,7 +184,175 @@ async function renderPlan() {
 }
 
 
-/* ---------------------------------------------------------------- settings */
+
+/* -------------------------------------------------------------- duplicates */
+
+const dup = { groups: [], total: 0, offset: 0, pageSize: 40, recoverable: 0 };
+
+function dupBanner(text, kind) {
+  const el = $('#dupBanner');
+  el.hidden = !text;
+  el.className = `banner banner--${kind}`;
+  el.innerHTML = text || '';
+}
+
+async function loadDuplicates(append = false) {
+  if (!append) { dup.offset = 0; dup.groups = []; }
+  let data;
+  try {
+    data = await api(`duplicates?offset=${dup.offset}&limit=${dup.pageSize}`);
+  } catch (err) {
+    dupBanner(err.message, 'bad');
+    return;
+  }
+
+  dup.total = data.total_groups;
+  dup.recoverable = data.recoverable_bytes;
+  dup.groups = append ? dup.groups.concat(data.groups) : data.groups;
+  dup.offset = dup.groups.length;
+
+  if (!data.can_analyse) {
+    dupBanner('No image decoder available. Install Pillow '
+      + '(<code>pip install Pillow</code>) to analyse photos.', 'bad');
+  } else if (data.unanalysed) {
+    dupBanner(`${num(data.unanalysed)} photos have not been analysed yet — `
+      + `press <strong>Find duplicates</strong>.`, 'ok');
+  } else {
+    dupBanner('', 'ok');
+  }
+
+  $('#dupSummary').textContent = dup.total
+    ? `${num(dup.total)} groups · ${bytes(dup.recoverable)} recoverable`
+    : '';
+  renderDuplicates();
+}
+
+function renderDuplicates() {
+  const marked = dup.groups.reduce(
+    (n, g) => n + g.members.filter((m) => m.action === 'delete').length, 0);
+  const btn = $('#dupApply');
+  btn.disabled = marked === 0;
+  btn.textContent = marked ? `Delete ${num(marked)} marked` : 'Delete marked';
+
+  if (!dup.groups.length) {
+    $('#dupGroups').innerHTML =
+      '<p class="muted">No near-duplicates found. Exact copies are already '
+      + 'collapsed automatically when photos are imported.</p>';
+    $('#dupMore').hidden = true;
+    return;
+  }
+
+  $('#dupGroups').innerHTML = dup.groups.map((g, gi) => {
+    const items = g.members.map((m, mi) => {
+      const state = m.action === 'delete' ? 'is-delete'
+        : m.action === 'keep' ? 'is-keep' : '';
+      const tag = m.action === 'delete'
+        ? '<span class="dupitem__tag tag-delete">DELETE</span>'
+        : m.action === 'keep'
+        ? '<span class="dupitem__tag tag-keep">KEEP</span>'
+        : m.hash === g.suggested_keep
+        ? '<span class="dupitem__tag tag-best">best</span>' : '';
+      const dims = m.width ? `${m.width}×${m.height}` : 'unknown size';
+      const warn = m.copies < 2
+        ? `<span class="dupitem__warn">only ${m.copies} copy</span>`
+        : `<span>${m.copies} copies</span>`;
+      return `<button class="dupitem ${state}" data-g="${gi}" data-m="${mi}"
+                      title="${m.rel_path}">
+        <span class="dupitem__frame">
+          <img loading="lazy" src="/api/photo/${m.hash}/thumb" alt="">
+          ${tag}
+        </span>
+        <span class="dupitem__meta">
+          <b>${dims}</b>
+          <span>${bytes(m.size)} · ${m.ext.toUpperCase()}</span><br>
+          ${warn}
+        </span>
+      </button>`;
+    }).join('');
+
+    return `<div class="dupgroup">
+      <div class="dupgroup__head">
+        <strong>${g.members.length} near-identical photos</strong>
+        <span>${bytes(g.wasted_bytes)} recoverable</span>
+        <span class="dupgroup__actions">
+          <button class="btn btn--sm" data-auto="${gi}">Keep the best</button>
+          <button class="btn btn--sm btn--ghost" data-skip="${gi}">Skip</button>
+        </span>
+      </div>
+      <div class="dupitems">${items}</div>
+    </div>`;
+  }).join('');
+
+  $('#dupMore').hidden = dup.groups.length >= dup.total;
+}
+
+/** Choosing a keeper marks every other member of that group for deletion. */
+function keepOnly(groupIndex, keepHash) {
+  const g = dup.groups[groupIndex];
+  const decisions = {};
+  for (const m of g.members) {
+    m.action = m.hash === keepHash ? 'keep' : 'delete';
+    decisions[m.hash] = m.action;
+  }
+  return decisions;
+}
+
+function skipGroup(groupIndex) {
+  const g = dup.groups[groupIndex];
+  const decisions = {};
+  for (const m of g.members) { m.action = ''; decisions[m.hash] = ''; }
+  return decisions;
+}
+
+async function recordDecisions(decisions) {
+  renderDuplicates();
+  try {
+    await post('duplicates/decide', { decisions });
+  } catch (err) {
+    dupBanner(`Could not save your decision: ${err.message}`, 'bad');
+  }
+}
+
+function attachDuplicates() {
+  $('#dupScan').addEventListener('click', () => startJob('dupscan'));
+  $('#dupMore').addEventListener('click', () => loadDuplicates(true));
+
+  $('#dupApply').addEventListener('click', async () => {
+    const marked = dup.groups.reduce(
+      (n, g) => n + g.members.filter((m) => m.action === 'delete').length, 0);
+    if (!marked) return;
+    if (!confirm(`Permanently delete ${marked} photos from every device?\n\n`
+      + `Each one is only removed if the photo you kept has been re-read and `
+      + `confirmed on enough devices first. This cannot be undone.`)) return;
+    try {
+      const res = await post('jobs', { action: 'dupapply', confirm: true });
+      if (res.error) return dupBanner(res.error, 'bad');
+      dupBanner('Deleting… see Activity for progress.', 'ok');
+      refreshJobs();
+    } catch (err) {
+      dupBanner(err.message, 'bad');
+    }
+  });
+
+  $('#dupGroups').addEventListener('click', (e) => {
+    const auto = e.target.closest('[data-auto]');
+    if (auto) {
+      const gi = Number(auto.dataset.auto);
+      return recordDecisions(keepOnly(gi, dup.groups[gi].suggested_keep));
+    }
+    const skip = e.target.closest('[data-skip]');
+    if (skip) return recordDecisions(skipGroup(Number(skip.dataset.skip)));
+
+    const item = e.target.closest('.dupitem');
+    if (item) {
+      const gi = Number(item.dataset.g);
+      const m = dup.groups[gi].members[Number(item.dataset.m)];
+      return recordDecisions(keepOnly(gi, m.hash));
+    }
+  });
+}
+
+/* -------------------------------------------------------------- settings */
 
 let draft = null;          // the config being edited, saved only on Save
 let drives = [];
@@ -530,6 +699,7 @@ async function refreshJobs() {
     refreshStatus();
     loadTimeline();
     loadPhotos();
+    if (state.view === 'duplicates') loadDuplicates();
   }
 
   if (state.view === 'activity') renderJobs(jobs);
@@ -583,11 +753,13 @@ function switchView(view) {
   document.title = `PhotoVault · ${PAGE_TITLES[view]}`;
   if (view === 'health') refreshStatus();
   if (view === 'activity') { refreshJobs(); loadEvents(); }
+  if (view === 'duplicates') loadDuplicates();
   if (view === 'settings') loadSettings().catch((e) => banner(e.message, 'bad'));
 }
 
 function attach() {
   attachSettings();
+  attachDuplicates();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 

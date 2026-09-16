@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import ingest, sync, verify
+from .. import duplicates, ingest, sync, verify
 from ..catalog import Catalog
 from ..config import Config
 
@@ -222,11 +222,38 @@ class JobRunner:
         job.message = f"{changed} placement corrections"
 
 
+    def _run_dupscan(self, job: Job, cat: Catalog, limit: int | None = None) -> None:
+        job.message = "analysing photos"
+
+        def progress(done, total):
+            job.done, job.total = done, total
+            job.message = f"analysed {done}/{total}"
+
+        st = duplicates.scan(self.cfg, cat, limit=limit, progress=progress)
+        groups = duplicates.find_groups(self.cfg, cat)
+        job.result = {"analysed": st.hashed, "undecodable": st.failed,
+                      "remaining": st.remaining, "groups": len(groups)}
+        job.message = f"{len(groups)} duplicate groups found"
+
+    def _run_dupapply(self, job: Job, cat: Catalog, confirm: bool = False) -> None:
+        if not confirm:
+            raise ValueError("refusing to delete without an explicit confirmation")
+        job.message = "removing reviewed duplicates"
+        rep = duplicates.apply(self.cfg, cat, dry_run=False,
+                               progress=lambda n: setattr(job, "done", n))
+        job.result = {"deleted": rep.deleted, "bytes_freed": rep.bytes_freed,
+                      "refused": len(rep.refused)}
+        job.errors.extend([f"kept {p}: {why}" for p, why in rep.refused[:20]])
+        job.errors.extend(rep.errors[:10])
+        job.message = f"deleted {rep.deleted}, kept {len(rep.refused)} as unsafe"
+
+
 def _label(action: str, kwargs: dict) -> str:
     target = kwargs.get("replica") or kwargs.get("device")
     base = {"ingest": "Import photos", "sync": "Back up",
-            "scrub": "Verify integrity", "reconcile": "Re-check devices"}.get(
-                action, action)
+            "scrub": "Verify integrity", "reconcile": "Re-check devices",
+            "dupscan": "Find duplicates",
+            "dupapply": "Delete reviewed duplicates"}.get(action, action)
     if kwargs.get("force"):
         base += " (full)"
     if kwargs.get("dry_run"):

@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import (__version__, config, health, importer, ingest, placement,
-               sync, verify)
+from . import (__version__, config, duplicates, health, importer, ingest,
+               placement, sync, verify)
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -722,6 +722,69 @@ def _print_reclaim(cfg, rep, *, applied: bool) -> None:
         print(f"{DIM}  Re-run with --apply (or --reclaim) to delete them.{RESET}")
 
 
+def cmd_duplicates(args) -> int:
+    """Find near-duplicate photos. Deletes nothing without an explicit review."""
+    cfg, cat = _load(args)
+
+    if args.apply:
+        rep = duplicates.apply(cfg, cat, dry_run=not args.yes)
+        verb = "would delete" if not args.yes else "deleted"
+        print(f"{verb} {rep.deleted:,} photos, freeing {human(rep.bytes_freed)}")
+        for path, why in rep.refused[:15]:
+            print(f"  {YELLOW}kept {Path(path).name}: {why}{RESET}")
+        for err in rep.errors[:10]:
+            print(f"  {RED}{err}{RESET}")
+        if not args.yes and rep.deleted:
+            print(f"\n{DIM}This was a preview. Re-run with --yes to delete.{RESET}")
+        cat.close()
+        return 0
+
+    try:
+        st = duplicates.scan(cfg, cat, limit=args.limit,
+                             progress=lambda n, t: print(f"  hashing {n}/{t}",
+                                                         end="\r", flush=True))
+    except RuntimeError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return 1
+    if st.hashed or st.failed:
+        print(f"  analysed {st.hashed:,} photos"
+              f"{f', {st.failed:,} could not be decoded' if st.failed else ''}"
+              f"{f', {st.remaining:,} still to do' if st.remaining else ''}        ")
+
+    groups = duplicates.find_groups(cfg, cat, threshold=args.threshold)
+    if not groups:
+        print(f"{GREEN}No near-duplicates found.{RESET}")
+        cat.close()
+        return 0
+
+    total = sum(g.wasted_bytes for g in groups)
+    print(f"\n{BOLD}{len(groups):,} groups{RESET} of near-duplicate photos, "
+          f"{human(total)} recoverable\n")
+
+    for group in groups[:args.show]:
+        marked = sum(1 for m in group.members if m.action == "delete")
+        tag = f"  {YELLOW}{marked} marked for deletion{RESET}" if marked else ""
+        print(f"{BOLD}group {group.id}{RESET}  {len(group.members)} copies, "
+              f"{human(group.wasted_bytes)} recoverable{tag}")
+        for m in group.members:
+            keep = m.hash == group.suggested_keep
+            dims = f"{m.width}x{m.height}" if m.width else "?"
+            mark = (f"{GREEN}keep{RESET}" if keep else f"{DIM}dup {RESET}")
+            if m.action == "delete":
+                mark = f"{RED}DEL {RESET}"
+            print(f"  {mark} {dims:>11}  {human(m.size):>9}  "
+                  f"{DIM}{m.copies} copies  {m.captured_at or 'no date'}{RESET}  "
+                  f"{m.rel_path}")
+        print()
+
+    if len(groups) > args.show:
+        print(f"{DIM}...and {len(groups) - args.show:,} more groups.{RESET}\n")
+    print(f"{DIM}Review them visually with 'photovault ui' -> Duplicates, then\n"
+          f"apply with 'photovault duplicates --apply --yes'.{RESET}")
+    cat.close()
+    return 0
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -863,6 +926,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("device", nargs="?")
     s.add_argument("--apply", action="store_true", help="actually delete")
     s.set_defaults(func=cmd_reclaim)
+
+    s = sub.add_parser("duplicates", help="find near-duplicate photos")
+    s.add_argument("--threshold", type=int, default=duplicates.DEFAULT_THRESHOLD,
+                   help="how many of 64 bits may differ (default 5)")
+    s.add_argument("--limit", type=int, help="analyse at most N new photos")
+    s.add_argument("--show", type=int, default=10, help="groups to print")
+    s.add_argument("--apply", action="store_true",
+                   help="act on decisions made in the UI")
+    s.add_argument("--yes", action="store_true",
+                   help="with --apply, actually delete instead of previewing")
+    s.set_defaults(func=cmd_duplicates)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

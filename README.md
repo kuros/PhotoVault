@@ -117,6 +117,7 @@ python3 -m photovault status      # am I actually protected?
 | `start` | Start everything — Immich, the UI, optionally the watcher |
 | `stop` | Stop the services `start` brought up |
 | `doctor` | What's connected, what's missing, what to do next |
+| `duplicates` | Find near-duplicates; `--apply --yes` to act on your review |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -427,6 +428,73 @@ isn't worth it for a monthly task.
 
 ---
 
+## Removing duplicate photos
+
+Byte-identical copies never need removing — content addressing collapses them at import,
+so the same photo arriving from your phone, an old laptop and a backup drive is stored
+once. What this handles is the messier kind: the same photo re-compressed by a messaging
+app, exported at half resolution, or re-saved by an editor. Different bytes, same
+picture.
+
+```bash
+python3 -m photovault duplicates
+```
+
+```
+6 groups of near-duplicate photos, 487.1 KB recoverable
+
+group 4ac11aaefab7  3 copies, 87.6 KB recoverable
+  keep     640x480   453.5 KB  2 copies  2024-03-15  2024/03/20240315-101100_5e940fd072.png
+  dup      320x240    81.7 KB  2 copies  2024-03-15  2024/03/20240315-101100_b2629e32e5.png
+  dup      320x240     5.9 KB  2 copies  2024-03-15  2024/03/20240315-101100_4ac11aaefa.jpg
+```
+
+### Review them visually
+
+```bash
+python3 -m photovault ui     # → Duplicates tab
+```
+
+Each group shows its photos side by side. **Click the one you want to keep** and the
+rest are marked for deletion; `Keep the best` accepts the suggestion, `Skip` leaves the
+group alone. Your decisions are saved as you go, so you can review a few hundred groups
+over several sittings.
+
+Nothing is deleted until you press **Delete marked**.
+
+### How it decides what's a duplicate
+
+A **dHash**: the image is shrunk to 9×8 grey pixels and each adjacent pair is recorded as
+"is the left one brighter?" — 64 bits describing the *shape* of the brightness gradient.
+That survives re-compression and resizing, because it ignores pixel values. Two photos
+are near-duplicates when fewer than 5 of those 64 bits differ (`--threshold` to change).
+
+It is deliberately **not** a similarity search. Burst shots of the same scene from
+slightly different angles will not collapse together, because the consequence here is
+deletion and "these look similar" is not good enough grounds for it.
+
+No dependency needed: it uses Pillow if installed, otherwise macOS's built-in `sips`.
+
+### Three refusals
+
+This is the only feature that deletes a photo you still want, so:
+
+- **Nothing without a decision.** No auto-delete, ever. The suggested keeper is a
+  suggestion.
+- **Never the last of a group.** If everything in a group is marked, nothing is removed.
+- **The keeper is re-verified first.** Before deleting a duplicate, the photo you kept is
+  re-read and re-hashed on every device, and must reach `min_copies`. Deleting a
+  duplicate because the catalog *claims* its twin is backed up — when that twin's only
+  drive has silently rotted — would destroy the last good version.
+
+Every deletion is written to the log with the photo that was kept in its place:
+
+```
+dup-delete  2024/03/…_5e940fd072.png (kept 2024/03/…_b2629e32e5.png)
+```
+
+---
+
 ## Setting up your four devices
 
 ### 1. Mac — the primary library
@@ -673,9 +741,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-89 tests covering ingest, deduplication, replication, corruption repair, catalog
+107 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, and launcher preflight.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, and duplicate review.
 
 ---
 

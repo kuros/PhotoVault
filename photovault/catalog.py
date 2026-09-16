@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS asset (
     captured_at TEXT,
     time_source TEXT NOT NULL,
     rel_path    TEXT NOT NULL UNIQUE,
-    added_at    TEXT NOT NULL
+    added_at    TEXT NOT NULL,
+    phash       TEXT,
+    width       INTEGER,
+    height      INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_asset_captured ON asset(captured_at);
 
@@ -68,6 +71,15 @@ CREATE TABLE IF NOT EXISTS placement (
 );
 CREATE INDEX IF NOT EXISTS idx_placement_replica ON placement(replica, state);
 CREATE INDEX IF NOT EXISTS idx_placement_verified ON placement(verified_at);
+
+-- A user's review decisions about duplicates. Keyed by content hash, not by
+-- group, because groups are recomputed from scratch each scan while a decision
+-- ("I have looked at this and it should go") stays valid.
+CREATE TABLE IF NOT EXISTS dup_decision (
+    hash       TEXT PRIMARY KEY REFERENCES asset(hash) ON DELETE CASCADE,
+    action     TEXT NOT NULL,
+    decided_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS event (
     id      INTEGER PRIMARY KEY,
@@ -112,6 +124,15 @@ class Catalog:
         for column, ddl in (("uuid", "TEXT"), ("last_synced_at", "TEXT")):
             if column not in have:
                 self.db.execute(f"ALTER TABLE replica ADD COLUMN {column} {ddl}")
+
+        have = {r["name"] for r in
+                self.db.execute("PRAGMA table_info(asset)").fetchall()}
+        for column, ddl in (("phash", "TEXT"), ("width", "INTEGER"),
+                            ("height", "INTEGER")):
+            if column not in have:
+                self.db.execute(f"ALTER TABLE asset ADD COLUMN {column} {ddl}")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_asset_phash ON asset(phash)")
         self.db.commit()
 
     def close(self) -> None:
@@ -287,3 +308,43 @@ class Catalog:
                 "SELECT device, abs_path, seen_at FROM source_file WHERE hash = ?",
                 (hash_,)).fetchall()],
         }
+
+
+    # -------------------------------------------------------------- duplicates
+
+    def assets_without_phash(self, limit: int | None = None):
+        q = ("SELECT hash, rel_path, ext, media_kind FROM asset "
+             "WHERE phash IS NULL AND media_kind = 'image' ORDER BY rel_path")
+        if limit:
+            q += f" LIMIT {int(limit)}"
+        return self.db.execute(q).fetchall()
+
+    def set_phash(self, hash_: str, phash: str | None,
+                  width: int | None = None, height: int | None = None) -> None:
+        self.db.execute(
+            "UPDATE asset SET phash = ?, width = ?, height = ? WHERE hash = ?",
+            (phash, width, height, hash_))
+
+    def assets_with_phash(self):
+        return self.db.execute(
+            "SELECT * FROM asset WHERE phash IS NOT NULL AND phash != ''"
+        ).fetchall()
+
+    def set_decision(self, hash_: str, action: str) -> None:
+        self.db.execute(
+            """INSERT INTO dup_decision(hash, action, decided_at) VALUES (?, ?, ?)
+               ON CONFLICT(hash) DO UPDATE SET action = excluded.action,
+                                               decided_at = excluded.decided_at""",
+            (hash_, action, now()))
+
+    def clear_decision(self, hash_: str) -> None:
+        self.db.execute("DELETE FROM dup_decision WHERE hash = ?", (hash_,))
+
+    def decisions(self) -> dict[str, str]:
+        return {r["hash"]: r["action"] for r in
+                self.db.execute("SELECT hash, action FROM dup_decision").fetchall()}
+
+    def remove_asset(self, hash_: str) -> None:
+        """Forget an asset entirely. Only ever called after its replicas have
+        been cleared and a keeper has been verified."""
+        self.db.execute("DELETE FROM asset WHERE hash = ?", (hash_,))

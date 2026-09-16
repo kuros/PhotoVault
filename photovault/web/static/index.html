@@ -23,6 +23,7 @@
     <button class="tab is-active" data-view="photos" role="tab">Photos</button>
     <button class="tab" data-view="health" role="tab">Health</button>
     <button class="tab" data-view="activity" role="tab">Activity</button>
+    <button class="tab" data-view="duplicates" role="tab">Duplicates</button>
     <button class="tab" data-view="settings" role="tab">Settings</button>
   </nav>
 
@@ -107,6 +108,27 @@
         <h3 class="panel__title">History</h3>
         <ul id="eventList" class="events"></ul>
       </div>
+    </div>
+
+    <!-- DUPLICATES -->
+    <div class="view" data-view="duplicates">
+      <div class="viewbar">
+        <h2>Duplicates</h2>
+        <div class="viewbar__right">
+          <span id="dupSummary" class="muted"></span>
+          <button id="dupScan" class="btn btn--sm">Find duplicates</button>
+          <button id="dupApply" class="btn btn--sm" disabled>Delete marked</button>
+        </div>
+      </div>
+      <div id="dupBanner" class="banner" hidden></div>
+      <p class="muted panel__sub" id="dupHelp">
+        Click the photo you want to <strong>keep</strong> in each group — the rest
+        are marked for deletion. Nothing is removed until you press
+        <strong>Delete marked</strong>, and a photo is only ever deleted once the
+        one you kept has been re-read and confirmed on enough devices.
+      </p>
+      <div id="dupGroups" class="dupgroups"></div>
+      <button id="dupMore" class="btn btn--wide" hidden>Load more groups</button>
     </div>
 
     <!-- SETTINGS -->
