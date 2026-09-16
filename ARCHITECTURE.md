@@ -457,3 +457,42 @@ matter.
 > **The general lesson:** strengthening a check often reveals that some *sequence* was
 > only ever correct by accident. The test that caught this was asserting a behaviour
 > ("the inbox empties"), not an implementation — which is why it noticed.
+
+
+---
+
+## Decision 12: the launcher reports what it cannot do
+
+`photovault start` brings up Immich, the web UI and optionally the watcher. The
+mechanical part is easy. The part worth designing is the preflight, and it exists
+because of a specific failure mode:
+
+**A backup run with the offline drive still in a drawer looks exactly like a successful
+one.** Every command exits zero, the log says files were copied, and you have achieved
+two copies instead of three without being told. So the first thing `start` prints is
+which drives are missing — before any service starts, above the library summary.
+
+It also distinguishes two states that a naive implementation would collapse:
+
+- an **offline** replica that is absent is *expected* — it lives unplugged by design
+- an **online** replica that is absent is a *fault* — something is broken
+
+Reporting both as "unreachable" would train you to ignore the line that matters.
+`Preflight.ready` is therefore defined as "no *online* device missing", not "everything
+present".
+
+Two smaller decisions that came out of running it rather than writing it:
+
+- **A failed Immich does not block the UI.** When the container start failed (registry
+  unreachable), the right behaviour was to print the error and carry on serving — the
+  archive does not depend on Immich, and a photo manager that refuses to open because an
+  optional service is down has its priorities backwards.
+- **stdout is set line-buffered.** Python block-buffers when stdout is not a terminal, so
+  under `nohup` or launchd the entire preflight sat invisible in a buffer while the user
+  wondered whether anything had started. Caught by running it under a log file, which is
+  how it will actually be run.
+
+> **The general lesson:** a status display earns its place by what it makes *impossible
+> to miss*, not by how much it shows. The redundancy numbers were already available from
+> `status`; what was missing was putting the one actionable line where a human could not
+> scroll past it.

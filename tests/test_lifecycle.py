@@ -924,3 +924,108 @@ class TestReclaim(VaultTestCase):
         rep = importer.reclaimable(self.cfg, self.cat, self.phone, apply=True)
         self.assertEqual(rep.deleted, 0, "a corrupt copy must not count toward min_copies")
         self.assertEqual(len(list(self.phone.rglob("*.jpg"))), 5)
+
+
+class TestLauncher(VaultTestCase):
+    """`start` is the monthly ritual's front door. Its job is to bring things
+    up and, more importantly, to say what it cannot do for you."""
+
+    def setUp(self):
+        super().setUp()
+        from photovault import launcher
+        self.launcher = launcher
+        # hdd is offline and genuinely absent; win is online and absent.
+        self.cfg.replicas = [
+            ReplicaSpec("mac", "local", str(self.tmp / "mac")),
+            ReplicaSpec("hdd", "local", "/Volumes/DefinitelyNotMounted/lib",
+                        offline=True),
+            ReplicaSpec("win", "local", "/Volumes/AlsoNotMounted/lib"),
+        ]
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+
+    def test_preflight_separates_unplugged_from_broken(self):
+        """An offline drive in a drawer is expected; an online one missing is
+        a fault. Reporting them the same way trains you to ignore both."""
+        pf = self.launcher.preflight(self.cfg)
+        self.assertIn("mac", pf.reachable)
+        self.assertEqual(pf.missing_offline, ["hdd"])
+        self.assertEqual(pf.missing_online, ["win"])
+        self.assertFalse(pf.ready)
+
+    def test_preflight_is_ready_when_online_devices_are_present(self):
+        self.cfg.replicas = [r for r in self.cfg.replicas if r.name != "win"]
+        pf = self.launcher.preflight(self.cfg)
+        self.assertTrue(pf.ready)
+        self.assertEqual(pf.missing_offline, ["hdd"])
+
+    def test_preflight_surfaces_real_redundancy_problems(self):
+        self.ingest_all()
+        pf = self.launcher.preflight(self.cfg)
+        self.assertEqual(pf.total_assets, 13)
+        self.assertFalse(pf.healthy)
+        self.assertTrue(any("below 3 copies" in i for i in pf.issues))
+
+    def test_preflight_report_renders_without_crashing(self):
+        import io
+        import contextlib
+        pf = self.launcher.preflight(self.cfg)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.launcher.print_preflight(self.cfg, pf)
+        out = buf.getvalue()
+        self.assertIn("hdd", out)
+        self.assertIn("Plug in hdd", out)
+
+    def test_immich_is_optional(self):
+        self.assertFalse(self.cfg.immich.enabled)
+        self.assertIsNone(self.cfg.immich.path)
+
+    def test_immich_ready_polls_the_configured_url(self):
+        """Verified against a real socket rather than a mock, so the URL
+        joining and the fallback across ping paths are actually exercised."""
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        seen = []
+
+        class Stub(BaseHTTPRequestHandler):
+            def do_GET(self):
+                seen.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+
+        httpd = HTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+
+        from photovault.config import ImmichSpec
+        self.cfg.immich = ImmichSpec(
+            compose_file="/nonexistent/docker-compose.yml",
+            url=f"http://127.0.0.1:{httpd.server_address[1]}")
+        self.assertTrue(self.launcher.immich_ready(self.cfg))
+        self.assertTrue(seen[0].endswith("/ping") or seen[0] == "/")
+
+    def test_immich_ready_is_false_when_nothing_answers(self):
+        from photovault.config import ImmichSpec
+        self.cfg.immich = ImmichSpec(compose_file="/x/docker-compose.yml",
+                                     url="http://127.0.0.1:1")
+        self.assertFalse(self.launcher.immich_ready(self.cfg))
+
+    def test_missing_compose_file_is_reported_not_raised(self):
+        """A broken Immich config must not stop the UI from starting."""
+        import io
+        import contextlib
+        from photovault.config import ImmichSpec
+        self.cfg.immich = ImmichSpec(compose_file=str(self.tmp / "nope.yml"))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            started = self.launcher.immich_up(self.cfg)
+        self.assertFalse(started)
+        self.assertIn("not found", buf.getvalue())

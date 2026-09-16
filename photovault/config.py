@@ -35,6 +35,21 @@ class SourceSpec:
 
 
 @dataclass
+class ImmichSpec:
+    """Optional Immich stack that `photovault start` brings up alongside the UI."""
+    compose_file: str = ""
+    url: str = "http://localhost:2283"
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.compose_file)
+
+    @property
+    def path(self) -> Path | None:
+        return Path(self.compose_file).expanduser() if self.compose_file else None
+
+
+@dataclass
 class Config:
     primary: str
     min_copies: int = 3
@@ -44,6 +59,7 @@ class Config:
     replicas: list[ReplicaSpec] = field(default_factory=list)
     sources: list[SourceSpec] = field(default_factory=list)
     source_path: Path | None = None
+    immich: ImmichSpec = field(default_factory=ImmichSpec)
 
     @property
     def shard_replicas(self) -> list[ReplicaSpec]:
@@ -99,6 +115,11 @@ def load(path: Path | None = None) -> Config:
                             kind=s.get("kind", "local"),
                             clear_after_import=bool(s.get("clear_after_import", False)))
                  for s in raw.get("source", [])],
+    )
+    immich = raw.get("immich", {})
+    cfg.immich = ImmichSpec(
+        compose_file=immich.get("compose_file", ""),
+        url=immich.get("url", "http://localhost:2283"),
     )
     if "catalog" in vault:
         cfg.catalog_path = Path(vault["catalog"]).expanduser()
@@ -220,6 +241,13 @@ def render(data: dict) -> str:
     if vault.get("catalog"):
         lines.append(f'catalog = {_toml_str(vault["catalog"])}')
 
+    immich = data.get("immich") or {}
+    if immich.get("compose_file"):
+        lines += ["", "# Optional: `photovault start` brings this up with the UI.",
+                  "[immich]",
+                  f'compose_file = {_toml_str(immich["compose_file"])}',
+                  f'url = {_toml_str(immich.get("url", "http://localhost:2283"))}']
+
     lines += ["", "# ---------------------------------------------------------- replicas"]
     for r in data.get("replica", []):
         lines += ["", "[[replica]]",
@@ -253,6 +281,7 @@ def render(data: dict) -> str:
 def to_dict(cfg: "Config") -> dict:
     """The inverse of load(), for handing the current config to the UI."""
     return {
+        "immich": {"compose_file": cfg.immich.compose_file, "url": cfg.immich.url},
         "vault": {
             "primary": cfg.primary, "min_copies": cfg.min_copies,
             "require_offline_copy": cfg.require_offline_copy,

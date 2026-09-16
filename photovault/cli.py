@@ -66,6 +66,45 @@ def cmd_setup(args) -> int:
     return wizard.run(path, force=args.force)
 
 
+def cmd_start(args) -> int:
+    """Bring up everything: Immich, the web UI, and optionally the watcher."""
+    from .launcher import start
+    cfg, cat = _load(args)
+    cat.close()          # the server opens its own per-thread connections
+    return start(cfg, port=args.port, host=args.host,
+                 open_browser=not args.no_browser, watch=args.watch,
+                 with_immich=not args.no_immich,
+                 config_path=Path(args.config).expanduser() if args.config
+                 else config.DEFAULT_CONFIG_PATH)
+
+
+def cmd_stop(args) -> int:
+    """Stop the background services that `start` brought up."""
+    from .launcher import immich_down
+    cfg, cat = _load(args)
+    cat.close()
+    if not cfg.immich.enabled:
+        print("Nothing to stop - no [immich] section configured.")
+        return 0
+    print("Stopping Immich...")
+    ok = immich_down(cfg)
+    print(f"  {GREEN}stopped{RESET}" if ok
+          else f"  {YELLOW}could not stop it (is Docker running?){RESET}")
+    return 0 if ok else 1
+
+
+def cmd_doctor(args) -> int:
+    """What is connected, what is missing, and what should happen next."""
+    from .launcher import preflight, print_preflight
+    cfg, cat = _load(args)
+    cat.close()
+    pf = preflight(cfg)
+    print()
+    print_preflight(cfg, pf)
+    print()
+    return 0 if (pf.ready and pf.healthy) else 2
+
+
 def cmd_replicas(args) -> int:
     cfg, cat = _load(args)
     print(f"{BOLD}{'replica':<12}{'kind':<8}{'offline':<9}{'status':<14}"
@@ -699,11 +738,28 @@ def build_parser() -> argparse.ArgumentParser:
         description="A distributed, cloud-free photo library with verifiable backups.")
     p.add_argument("--version", action="version", version=f"photovault {__version__}")
     p.add_argument("-c", "--config", help="path to config.toml")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="write a starter config file")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("start",
+                       help="start everything: Immich, the web UI, the watcher")
+    s.add_argument("--port", type=int, default=8723)
+    s.add_argument("--host", default="127.0.0.1",
+                   help="default 127.0.0.1 - this machine only")
+    s.add_argument("--watch", action="store_true",
+                   help="also import automatically as photos arrive")
+    s.add_argument("--no-immich", action="store_true", help="skip Immich")
+    s.add_argument("--no-browser", action="store_true")
+    s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("stop", help="stop the services 'start' brought up")
+    s.set_defaults(func=cmd_stop)
+
+    s = sub.add_parser("doctor", help="what is connected and what is missing")
+    s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("setup", help="interactive setup - pick how drives store photos")
     s.add_argument("--force", action="store_true")
@@ -815,7 +871,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "func", None) is None:
+        # No subcommand: do the thing someone typing `photovault` almost
+        # certainly wants, rather than printing usage at them.
+        args = parser.parse_args([*(["-c", args.config] if args.config else []),
+                                  "start"])
     try:
         return args.func(args)
     except FileNotFoundError as exc:

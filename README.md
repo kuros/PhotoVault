@@ -25,6 +25,51 @@ overwrites it. That's the whole system.
 ## Quick start
 
 ```bash
+python3 -m photovault setup     # interactive: pick your drives and storage model
+python3 -m photovault           # start everything
+```
+
+`photovault` with no arguments is the same as `photovault start`: it checks what's
+connected, brings up Immich if you've configured it, opens the web UI, and tells you
+what to do next.
+
+```
+PhotoVault
+
+Devices
+  connected      mac (primary)
+  connected      hdd-a
+  not plugged in hdd-b
+
+Library  184,302 photos - needs attention
+  - 12,904 photos below 3 copies
+
+Plug in hdd-b before syncing, or those copies will not be made.
+
+Immich
+  starting containers...
+  ready at http://localhost:2283
+
+Next
+  1. plug in hdd-b
+  2. photovault import       # pull from your devices and back up
+  3. photovault reclaim      # what is safe to delete from the phone
+
+PhotoVault UI running at http://127.0.0.1:8723/
+```
+
+The preflight leads with missing drives on purpose. A backup run with the offline drive
+still in the drawer looks successful and quietly achieves less than you think, so the
+one thing `start` cannot do for you is the first thing it says.
+
+Flags: `--watch` also imports automatically as photos arrive, `--no-immich` skips the
+containers, `--port` / `--no-browser` as you'd expect. `photovault stop` brings Immich
+back down; `photovault doctor` prints just the preflight and exits non-zero if something
+needs attention.
+
+To write a config by hand instead:
+
+```bash
 python3 -m photovault init
 ```
 
@@ -69,6 +114,9 @@ python3 -m photovault status      # am I actually protected?
 | `install-agent` | Run the watcher from login (macOS) |
 | `import <device>` | Pull from a device, archive it, verify |
 | `reclaim <device>` | What's provably safe to delete? |
+| `start` | Start everything — Immich, the UI, optionally the watcher |
+| `stop` | Stop the services `start` brought up |
+| `doctor` | What's connected, what's missing, what to do next |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -625,9 +673,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-81 tests covering ingest, deduplication, replication, corruption repair, catalog
+89 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, and reclaim safety.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, and launcher preflight.
 
 ---
 
