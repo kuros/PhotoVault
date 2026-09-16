@@ -509,6 +509,97 @@ def cmd_rebalance(args) -> int:
     return rc
 
 
+def cmd_watch(args) -> int:
+    """Import and back up automatically as photos land in the inbox folders."""
+    from . import watcher
+    cfg, cat = _load(args)
+    cat.close()  # the watcher opens its own connection
+
+    inboxes = [s for s in cfg.sources if s.clear_after_import] or cfg.sources
+    print(f"Watching {len(cfg.sources)} source folder(s) every {args.interval}s:")
+    for src in cfg.sources:
+        root = Path(src.path).expanduser()
+        mark = GREEN + "ok" + RESET if root.is_dir() else YELLOW + "missing" + RESET
+        clears = " (clears after import)" if src.clear_after_import else ""
+        print(f"  {src.device:<10}{root}  [{mark}]{DIM}{clears}{RESET}")
+    print(f"\n{DIM}New photos are imported and backed up automatically. "
+          f"Ctrl+C to stop.{RESET}\n")
+
+    watcher.watch(cfg, cfg.catalog_path, interval=args.interval,
+                  clear=args.clear, once=args.once)
+    return 0
+
+
+def cmd_install_agent(args) -> int:
+    """Install a launchd agent so the watcher runs from login."""
+    import subprocess
+    import sys as _sys
+
+    if _sys.platform != "darwin":
+        print(f"{RED}install-agent is macOS only. On Windows, use Task "
+              f"Scheduler to run 'photovault watch' at logon.{RESET}")
+        return 1
+
+    label = "com.photovault.watch"
+    agents = Path.home() / "Library" / "LaunchAgents"
+    plist = agents / f"{label}.plist"
+    logs = Path.home() / "Library" / "Logs" / "PhotoVault"
+    logs.mkdir(parents=True, exist_ok=True)
+
+    cfg_path = Path(args.config).expanduser() if args.config else config.DEFAULT_CONFIG_PATH
+    argv = [_sys.executable, "-m", "photovault", "-c", str(cfg_path),
+            "watch", "--interval", str(args.interval)]
+    entries = "".join(f"\n        <string>{a}</string>" for a in argv)
+
+    body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>{entries}
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>WorkingDirectory</key><string>{Path.home()}</string>
+    <key>StandardOutPath</key><string>{logs / 'watch.log'}</string>
+    <key>StandardErrorPath</key><string>{logs / 'watch.err'}</string>
+    <key>ProcessType</key><string>Background</string>
+</dict>
+</plist>
+"""
+    if args.uninstall:
+        subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{label}"],
+                       capture_output=True)
+        plist.unlink(missing_ok=True)
+        print(f"{GREEN}Removed.{RESET} The watcher will not start at login.")
+        return 0
+
+    agents.mkdir(parents=True, exist_ok=True)
+    plist.write_text(body)
+    subprocess.run(["launchctl", "bootout", f"gui/{_uid()}/{label}"],
+                   capture_output=True)
+    r = subprocess.run(["launchctl", "bootstrap", f"gui/{_uid()}", str(plist)],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"{YELLOW}Wrote {plist} but launchctl refused to load it:{RESET}")
+        print(f"  {r.stderr.strip()}")
+        print(f"{DIM}Log out and back in, or run: "
+              f"launchctl bootstrap gui/{_uid()} {plist}{RESET}")
+        return 1
+    print(f"{GREEN}Installed.{RESET} The watcher now runs from login.")
+    print(f"  plist : {plist}")
+    print(f"  log   : {logs / 'watch.log'}")
+    print(f"{DIM}Remove it with: photovault install-agent --uninstall{RESET}")
+    return 0
+
+
+def _uid() -> int:
+    import os
+    return os.getuid()
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -605,6 +696,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--apply", action="store_true",
                    help="actually delete; without this it only previews")
     s.set_defaults(func=cmd_rebalance)
+
+    s = sub.add_parser("watch",
+                       help="auto-import and back up as photos land in the inbox")
+    s.add_argument("--interval", type=float, default=20.0,
+                   help="seconds between checks (default 20)")
+    s.add_argument("--clear", action="store_true",
+                   help="empty every inbox after import, not just configured ones")
+    s.add_argument("--once", action="store_true", help="one pass, then exit")
+    s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser("install-agent",
+                       help="run the watcher automatically from login (macOS)")
+    s.add_argument("--interval", type=float, default=20.0)
+    s.add_argument("--uninstall", action="store_true")
+    s.set_defaults(func=cmd_install_agent)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

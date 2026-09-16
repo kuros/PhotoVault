@@ -28,6 +28,9 @@ class ReplicaSpec:
 class SourceSpec:
     device: str
     path: str
+    # Inboxes should empty once their photos are safely in the library;
+    # a folder you also browse (an Apple Photos library) must never be touched.
+    clear_after_import: bool = False
 
 
 @dataclass
@@ -91,7 +94,8 @@ def load(path: Path | None = None) -> Config:
         require_offline_copy=bool(vault.get("require_offline_copy", True)),
         scrub_days=int(vault.get("scrub_days", 30)),
         replicas=replicas,
-        sources=[SourceSpec(device=s["device"], path=s["path"])
+        sources=[SourceSpec(device=s["device"], path=s["path"],
+                            clear_after_import=bool(s.get("clear_after_import", False)))
                  for s in raw.get("source", [])],
     )
     if "catalog" in vault:
@@ -166,11 +170,17 @@ root = "/d/PhotoVault/library"
 device = "mac"
 path = "~/Pictures/Photos Library.photoslibrary/originals"
 
+# Inbox folders: point Image Capture or a sync app here. clear_after_import
+# empties them once each photo is verified present in the library, so the
+# inbox does not grow into a second copy of everything.
+
 [[source]]
 device = "iphone"
 path = "~/PhotoVault/inbox/iphone"
+clear_after_import = true
 
 [[source]]
 device = "ipad"
 path = "~/PhotoVault/inbox/ipad"
+clear_after_import = true
 """

@@ -671,3 +671,104 @@ class TestRebalanceSafety(ShardTestCase):
         self.ingest_all()
         with self.assertRaises(ReplicaError):
             sync.rebalance(self.cfg, self.cat, "mac")
+
+
+class TestInboxWatcher(VaultTestCase):
+    """Getting photos off a phone needs a deliberate act; everything after
+    that should need none."""
+
+    def setUp(self):
+        super().setUp()
+        self.inbox = self.tmp / "inbox"
+        self.inbox.mkdir()
+        self.cfg.sources = [SourceSpec("iphone", str(self.inbox),
+                                       clear_after_import=True)]
+
+    def drop(self, n: int = 4) -> list[Path]:
+        """Simulate Image Capture depositing photos."""
+        from make_fixtures import jpeg_with_exif
+        made = []
+        for i in range(n):
+            p = self.inbox / f"IMG_{7000 + i}.jpg"
+            p.write_bytes(jpeg_with_exif(f"2025:03:1{i} 09:0{i}:00",
+                                         f"inbox-{i}".encode() * 50))
+            made.append(p)
+        return made
+
+    def test_one_pass_imports_and_replicates(self):
+        from photovault import watcher
+        self.drop(4)
+        watcher.SETTLE_SECONDS = 0.01
+        stats = watcher.run_once(self.cfg, self.cat, report=lambda *_: None)
+        self.assertEqual(stats.imported, 4)
+        self.assertEqual(len(list((self.tmp / "mac").rglob("*.jpg"))), 4)
+        # Every backup replica got them too, without a separate command.
+        for name in ("hdd", "win"):
+            self.assertEqual(len(list((self.tmp / name).rglob("*.jpg"))), 4)
+
+    def test_inbox_is_emptied_only_after_the_library_copy_verifies(self):
+        from photovault import watcher
+        self.drop(4)
+        watcher.SETTLE_SECONDS = 0.01
+        watcher.run_once(self.cfg, self.cat, report=lambda *_: None)
+        self.assertEqual(list(self.inbox.rglob("*.jpg")), [],
+                         "inbox should empty once photos are safely stored")
+
+    def test_inbox_is_kept_when_the_library_copy_is_damaged(self):
+        """Clearing an inbox deletes originals, so a corrupt library copy must
+        stop it - otherwise a bad import quietly destroys the only good file."""
+        from photovault import watcher
+        self.drop(3)
+        watcher.SETTLE_SECONDS = 0.01
+        ingest.ingest_source(self.cfg, self.cat, "iphone", self.inbox)
+
+        for stored in (self.tmp / "mac").rglob("*.jpg"):
+            stored.write_bytes(stored.read_bytes() + b"corrupted")
+
+        removed, notes = watcher.clear_imported(self.cfg, self.cat, self.inbox)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(list(self.inbox.rglob("*.jpg"))), 3)
+        self.assertTrue(any("did not verify" in n for n in notes))
+
+    def test_sources_without_the_flag_are_never_emptied(self):
+        """An Apple Photos library is a source you also browse. Deleting from
+        it would be catastrophic, so clearing is strictly opt-in."""
+        from photovault import watcher
+        self.cfg.sources = [SourceSpec("mac", str(self.inbox))]  # no flag
+        self.drop(3)
+        watcher.SETTLE_SECONDS = 0.01
+        watcher.run_once(self.cfg, self.cat, report=lambda *_: None)
+        self.assertEqual(len(list(self.inbox.rglob("*.jpg"))), 3)
+
+    def test_a_file_still_being_written_is_not_imported(self):
+        """A half-copied photo hashes as a different, corrupt asset - and
+        PhotoVault would then faithfully replicate that corruption."""
+        from photovault import watcher
+        growing = self.inbox / "IMG_9999.jpg"
+        growing.write_bytes(b"\xff\xd8" + b"\x00" * 1000)
+
+        calls = {"n": 0}
+        real_snapshot = watcher.snapshot
+
+        def changing(root):
+            # Pretend the file grows between the two samples.
+            calls["n"] += 1
+            snap = dict(real_snapshot(root))
+            if calls["n"] > 1:
+                snap[str(growing)] = (5000 + calls["n"] * 100, 1.0)
+            return snap
+
+        watcher.snapshot = changing
+        watcher.SETTLE_SECONDS = 0.01
+        try:
+            settled = watcher.wait_until_settled(self.inbox, settle=0.01, timeout=0.2)
+        finally:
+            watcher.snapshot = real_snapshot
+        self.assertFalse(settled, "a growing folder must not be reported settled")
+        self.assertEqual(len(self.cat.all_assets()), 0)
+
+    def test_settled_folder_is_recognised(self):
+        from photovault import watcher
+        self.drop(2)
+        self.assertTrue(watcher.wait_until_settled(self.inbox, settle=0.01,
+                                                   timeout=5))

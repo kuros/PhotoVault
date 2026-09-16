@@ -65,6 +65,8 @@ python3 -m photovault status      # am I actually protected?
 | `setup` | Interactive setup — pick full copies or sharding |
 | `plan` | Preview how the library splits across drives |
 | `rebalance` | Reclaim space on a shard after the drives changed |
+| `watch` | Auto-import and back up as photos land in the inbox |
+| `install-agent` | Run the watcher from login (macOS) |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -359,22 +361,94 @@ break the config.
 
 ### 4. iPhone and iPad — sources, not backups
 
-Phones make poor backup replicas: limited storage, and iOS aggressively kills
-background sync. So they feed photos *in* and read photos *out*, but they aren't
-counted as one of your three copies.
+Phones make poor backup replicas: limited storage, and iOS kills background sync. So
+they feed photos *in* and read photos *out*, but they aren't counted as one of your
+three copies.
 
-The simplest reliable path is a plain cable import into an inbox folder:
+**The honest constraint:** iOS does not allow a background process to copy your camera
+roll to a Mac unattended. That's a platform restriction, not something a program can
+work around. Truly automatic, phone-in-your-pocket sync requires iCloud Photos — which
+is the cloud you said you don't want. Without it, getting photos *off* the phone always
+involves a deliberate act: plugging in a cable, or opening an app.
+
+Everything *after* that is automatic. Pick one of these:
+
+#### Option A — cable + Image Capture (recommended, nothing to install)
+
+`Image Capture` ships with macOS and can auto-import to a folder:
+
+1. Plug in the iPhone, open **Image Capture**, select the device.
+2. Set **Import To** → `~/PhotoVault/inbox/iphone`.
+3. Tick **Delete after import** if you want the camera roll cleared.
+4. Click the ⚙ and set **Connecting this iPhone opens: Image Capture**.
+
+Now plugging in the cable copies new photos into the inbox. Nothing else to do.
+
+#### Option B — Syncthing (wireless, no cloud)
+
+Install [Syncthing](https://syncthing.net) on the Mac and **Möbius Sync** on the iPhone,
+and share a folder pointed at `~/PhotoVault/inbox/iphone`. Peer-to-peer over your own
+wifi, nothing leaves the house. iOS limits background time, so in practice it syncs
+when you open the app and for a while afterwards — not continuously.
+
+#### Option C — PhotoSync (wireless, paid, best background behaviour)
+
+The [PhotoSync](https://www.photosync-app.com) iOS app transfers to an SMB or SFTP
+target and has the most reliable background transfer of any non-cloud option. Point it
+at a shared folder that maps to your inbox.
+
+### Then let PhotoVault do the rest
+
+```bash
+python3 -m photovault watch
+```
+
+This watches the inbox folders and, whenever photos arrive, imports them and fans them
+out to every backup device — no commands from you:
+
+```
+Watching 2 source folder(s) every 20.0s:
+  iphone    ~/PhotoVault/inbox/iphone  [ok] (clears after import)
+  ipad      ~/PhotoVault/inbox/ipad    [ok] (clears after import)
+
+  iphone: 5 file(s) waiting
+  iphone: imported 5
+  iphone: cleared 5 from the inbox
+  hdd: backed up 5
+```
+
+Make it run from login so you never think about it again:
+
+```bash
+python3 -m photovault install-agent
+```
+
+(macOS only; on Windows use Task Scheduler to run `photovault watch` at logon. Remove it
+with `--uninstall`.)
+
+**Two safety behaviours worth knowing about:**
+
+*It waits for copying to finish.* A photo imported halfway would hash as a different,
+corrupt asset — and PhotoVault would then faithfully replicate that corruption to every
+drive. So the watcher waits until the folder stops changing before touching anything.
+
+*It empties inboxes only after verifying.* `clear_after_import = true` deletes an inbox
+file once the library copy has been **re-read and re-hashed** — not merely recorded in
+the catalog. This deletes originals, so a catalog row is not good enough evidence.
+Clearing is opt-in per source, so a folder you also browse (your Apple Photos library)
+is never touched:
 
 ```toml
 [[source]]
 device = "iphone"
 path = "~/PhotoVault/inbox/iphone"
-```
+clear_after_import = true      # an inbox: empty it once safely stored
 
-Use macOS **Image Capture** (built in) to pull the camera roll into that folder, then
-run `ingest`. For hands-off syncing, install [Syncthing](https://syncthing.net) with
-the *Möbius Sync* iOS app pointed at the same inbox. PhotoVault never modifies a
-source folder, so it's safe to point it at a folder another tool is managing.
+[[source]]
+device = "mac"
+path = "~/Pictures/Photos Library.photoslibrary/originals"
+                               # no flag: read-only, never modified
+```
 
 ---
 
@@ -401,7 +475,8 @@ compare devices by listing filenames instead of re-hashing terabytes.
 
 ## Your routine
 
-**Weekly** (or whenever you've taken photos):
+**Continuously**, if you installed the watcher — plug in the phone and it handles
+itself. Otherwise, whenever you've taken photos:
 ```bash
 python3 -m photovault ingest && python3 -m photovault sync --all
 ```
@@ -459,9 +534,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-59 tests covering ingest, deduplication, replication, corruption repair, catalog
+65 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, and the delete path.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, and inbox watching.
 
 ---
 
