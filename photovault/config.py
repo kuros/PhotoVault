@@ -33,6 +33,7 @@ class Config:
     catalog_path: Path = field(default_factory=lambda: Path.home() / ".config" / "photovault" / "catalog.db")
     replicas: list[ReplicaSpec] = field(default_factory=list)
     sources: list[SourceSpec] = field(default_factory=list)
+    source_path: Path | None = None
 
     def replica(self, name: str) -> ReplicaSpec:
         for r in self.replicas:
@@ -77,6 +78,7 @@ def load(path: Path | None = None) -> Config:
     if "catalog" in vault:
         cfg.catalog_path = Path(vault["catalog"]).expanduser()
     cfg.replica(cfg.primary)  # fail fast if primary points at nothing
+    cfg.source_path = path    # so recovery kits can copy the real file
     return cfg
 
 

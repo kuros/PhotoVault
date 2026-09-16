@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 from .catalog import Catalog
 from .config import Config
+from .mediatime import normalize_ext
 from .replicas import Driver, LocalDriver, ReplicaError, driver_for
 
 
@@ -95,6 +98,7 @@ def push(cfg: Config, catalog: Catalog, name: str, *, limit: int | None = None,
             progress(stats, len(missing))
 
     if not dry_run:
+        write_recovery_kit(cfg, catalog, name)
         catalog.log("push", stats.summary())
     return stats
 
@@ -153,8 +157,14 @@ def rebuild_from(cfg: Config, catalog: Catalog, name: str, *, progress=None) -> 
 
     root = drv.root
     found = 0
+    from .ingest import WANTED_EXT
+
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.name.startswith(".") or path.suffix == ".part":
+            continue
+        # Only media. Without this, the recovery kit we write into every replica
+        # root would itself be catalogued as a photo.
+        if normalize_ext(path) not in WANTED_EXT:
             continue
         rel = str(path.relative_to(root))
         try:
@@ -182,3 +192,87 @@ def local_copy(cfg: Config, catalog: Catalog, hash_: str, rel_path: str) -> Path
     """Any locally readable copy of an asset, primary preferred. Used to serve
     and thumbnail photos without caring which device they came from."""
     return _local_source(cfg, catalog, hash_, rel_path, exclude="")
+
+
+RECOVERY_DOC = """# How to recover these photos
+
+This drive holds a complete copy of a PhotoVault photo library. The photos are
+ordinary files in dated folders - you do not need PhotoVault to read them. Open
+`library/` in Finder or Explorer and everything is there.
+
+To rebuild the full system on a replacement computer:
+
+1. Install Python 3.11 or newer, and get PhotoVault:
+   https://github.com/YOURNAME/photovault      <- push your code here!
+
+2. Copy `photovault-config.toml` from this drive to
+   `~/.config/photovault/config.toml` and edit the paths to match the new
+   machine.
+
+3. Rebuild the catalog from this drive, then re-learn the other devices:
+
+       python3 -m photovault rebuild {replica}
+       python3 -m photovault reconcile --all
+
+4. Refill the new primary computer, and verify every byte:
+
+       python3 -m photovault sync --all
+       python3 -m photovault scrub --force
+       python3 -m photovault status
+
+Step 4 should end with four OK lines. If it does, nothing was lost.
+
+---
+Library: {count} files, {size}
+Devices in this vault: {replicas}
+Written by PhotoVault on {when}
+"""
+
+
+def write_recovery_kit(cfg: Config, catalog: Catalog, name: str) -> bool:
+    """Leave recovery instructions and a config copy on the replica itself.
+
+    Found by running a disaster drill: the config file lived only on the Mac,
+    so losing the Mac meant rewriting it from memory before recovery could
+    start. A backup that cannot explain how to restore itself is only half a
+    backup.
+    """
+    spec = cfg.replica(name)
+    if spec.kind != "local":
+        return False
+    drv = LocalDriver(spec)
+    if not drv.available():
+        return False
+
+    row = catalog.db.execute(
+        "SELECT COUNT(*) n, COALESCE(SUM(size), 0) b FROM asset").fetchone()
+    size = row["b"]
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size) < 1024:
+            break
+        size /= 1024
+
+    # The kit goes INSIDE the replica root, never beside it. Writing to
+    # root.parent would escape the configured directory entirely - for a root
+    # of /Volumes/Backup that means writing into /Volumes. Never write outside
+    # the path the user configured. Non-media files here are ignored by
+    # rebuild_from() and reconcile().
+    kit = drv.root
+    try:
+        kit.mkdir(parents=True, exist_ok=True)
+        (kit / "RECOVERY.md").write_text(RECOVERY_DOC.format(
+            replica=name, count=row["n"], size=f"{size:.1f} {unit}",
+            replicas=", ".join(r.name for r in cfg.replicas),
+            when=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        ))
+        source = _config_source_path(cfg)
+        if source and source.exists():
+            shutil.copy2(source, kit / "photovault-config.toml")
+    except OSError:
+        return False
+    return True
+
+
+def _config_source_path(cfg: Config) -> Path | None:
+    from .config import DEFAULT_CONFIG_PATH
+    return getattr(cfg, "source_path", None) or DEFAULT_CONFIG_PATH

@@ -255,6 +255,79 @@ class TestDisasterRecovery(VaultTestCase):
         self.assertEqual({a["hash"] for a in self.cat.all_assets()}, expected)
 
 
+class TestRecoveryKit(VaultTestCase):
+    """A backup that cannot explain how to restore itself is half a backup."""
+
+    def test_sync_leaves_instructions_on_the_replica(self):
+        self.ingest_all()
+        self.sync_all()
+        doc = self.tmp / "hdd" / "RECOVERY.md"   # inside the root, never beside it
+        self.assertTrue(doc.exists())
+        text = doc.read_text()
+        self.assertIn("photovault rebuild hdd", text)
+        self.assertIn("reconcile --all", text)
+        self.assertIn("13", text)          # the file count is recorded
+
+    def test_kit_never_writes_outside_the_replica_root(self):
+        """A root of /Volumes/Backup must not cause writes into /Volumes."""
+        self.ingest_all()
+        self.sync_all()
+        before = set(self.tmp.iterdir())
+        sync.write_recovery_kit(self.cfg, self.cat, "hdd")
+        self.assertEqual(set(self.tmp.iterdir()), before,
+                         "nothing may appear outside the configured root")
+        self.assertTrue((self.tmp / "hdd" / "RECOVERY.md").exists())
+
+    def test_recovery_kit_is_not_catalogued_as_photos(self):
+        """The kit sits next to the library and must never be mistaken for media."""
+        self.ingest_all()
+        self.sync_all()
+        (self.tmp / "hdd" / "stray-note.txt").write_text("not a photo")
+
+        self.cat.close()
+        self.cfg.catalog_path.unlink()
+        self.cat = Catalog(self.cfg.catalog_path)
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+        self.assertEqual(sync.rebuild_from(self.cfg, self.cat, "hdd"), 13)
+
+    def test_total_loss_of_the_mac_loses_nothing(self):
+        """The full drill: library, catalog and config all gone at once."""
+        self.ingest_all()
+        self.sync_all()
+        expected = {a["hash"]: a["rel_path"] for a in self.cat.all_assets()}
+        originals = {rel: (self.tmp / "hdd" / rel).read_bytes()
+                     for rel in expected.values()}
+
+        # The Mac dies: primary library and catalog are destroyed together.
+        self.cat.close()
+        shutil.rmtree(self.tmp / "mac")
+        self.cfg.catalog_path.unlink()
+        for suffix in ("-wal", "-shm"):
+            Path(str(self.cfg.catalog_path) + suffix).unlink(missing_ok=True)
+
+        # Recovery on a replacement machine, starting from the drive alone.
+        self.cat = Catalog(self.cfg.catalog_path)
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+        sync.rebuild_from(self.cfg, self.cat, "hdd")
+        for name in ("mac", "win"):
+            sync.reconcile(self.cfg, self.cat, name)
+        sync.push(self.cfg, self.cat, "mac")
+
+        self.assertEqual({a["hash"]: a["rel_path"]
+                          for a in self.cat.all_assets()}, expected)
+        for rel, data in originals.items():
+            self.assertEqual((self.tmp / "mac" / rel).read_bytes(), data,
+                             f"{rel} did not come back byte-identical")
+        st = verify.scrub(self.cfg, self.cat, force=True)
+        self.assertEqual(st.corrupt, 0)
+        self.assertEqual(st.unrepairable, 0)
+        self.assertTrue(health.assess(self.cfg, self.cat).ok)
+
+
 class TestSafetyGuards(VaultTestCase):
     def test_unmounted_volume_is_refused(self):
         """The dangerous failure: an unplugged drive silently becoming a folder
