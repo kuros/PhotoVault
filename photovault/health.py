@@ -29,7 +29,8 @@ class Health:
 def assess(cfg: Config, catalog: Catalog) -> Health:
     h = Health()
     row = catalog.db.execute(
-        "SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM asset").fetchone()
+        "SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM asset "
+        "WHERE deleted_at IS NULL").fetchone()
     h.total_assets, h.total_bytes = row["n"], row["b"]
 
     offline = {r.name for r in cfg.replicas if r.offline}
@@ -38,7 +39,8 @@ def assess(cfg: Config, catalog: Catalog) -> Health:
         r = catalog.db.execute(
             """SELECT state, COUNT(*) n, COALESCE(SUM(a.size),0) b
                FROM placement p JOIN asset a ON a.hash = p.hash
-               WHERE p.replica = ? GROUP BY state""", (spec.name,)).fetchall()
+               WHERE p.replica = ? AND a.deleted_at IS NULL
+               GROUP BY state""", (spec.name,)).fetchall()
         counts = {x["state"]: x["n"] for x in r}
         bytes_ = sum(x["b"] for x in r if x["state"] == "present")
         h.per_replica[spec.name] = {
@@ -59,7 +61,8 @@ def assess(cfg: Config, catalog: Catalog) -> Health:
                      AND p.replica IN (%s)) AS offline_copies,
                   (SELECT COUNT(*) FROM placement p
                    WHERE p.hash = a.hash AND p.state = 'corrupt') AS bad
-           FROM asset a""" % (",".join("?" * len(offline)) or "''"),
+           FROM asset a WHERE a.deleted_at IS NULL"""
+        % (",".join("?" * len(offline)) or "''"),
         tuple(offline),
     ):
         c = a["copies"]

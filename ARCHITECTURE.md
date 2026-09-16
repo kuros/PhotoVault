@@ -594,3 +594,63 @@ Two implementation details that matter as much as the validation:
 > question is not "is this input valid?" but "what is the smallest set of shapes I can
 > reconstruct it into?" Validation you can enumerate beats validation you have to
 > anticipate.
+
+
+---
+
+## Decision 15: when you cannot prove safety, buy time instead
+
+PhotoVault now has five destructive operations, and four of them share a guard:
+
+| Operation | What it removes | Guard |
+|---|---|---|
+| `rebalance` | an over-replicated copy | `min_copies` verified copies remain |
+| `reclaim` | a phone or inbox original | `min_copies` verified copies remain |
+| `duplicates apply` | a near-twin | the keeper has `min_copies` verified copies |
+| `uploads clear` | a staged original | `min_copies` verified copies remain |
+| **`delete`** | **the photo** | **— nothing remains to verify against** |
+
+The fifth breaks the pattern, and noticing that it *had* to break it was the design.
+Every existing guard asks "does this photo survive elsewhere?" — a question with no
+meaningful answer when the user's intent is that it should not. And no technical check
+distinguishes a deliberate deletion from a misclick.
+
+So deletion is **soft**: the asset is marked, and every file stays exactly where it is,
+fully replicated, until it is purged. The photo disappears from the library, the health
+report, the duplicate scanner and future replication — but restoring it is a flag flip
+rather than a recovery, because nothing was ever recovered *from*.
+
+The cost is honest and bounded: trashed photos keep occupying space on every device
+until purged. That is the price of the safety net, and `trash` reports it.
+
+> **The general lesson:** when a guarantee cannot be checked, substitute reversibility.
+> "Provably safe" and "undoable for 30 days" are both acceptable answers; "we asked the
+> user twice" is not.
+
+### Purge refuses on a disconnected device
+
+The one refusal worth spelling out. Purging removes the file from every replica and then
+forgets the asset. With a drive in a drawer, that leaves the file stranded there while
+the catalog no longer knows it exists — and `rebuild` from that drive would resurrect it
+as a photo you deliberately deleted, with no record of the decision.
+
+So purge requires every configured device to be reachable. Unlike the other refusals,
+this one is not about redundancy at all; it is about not leaving the system in a state
+that lies.
+
+### What deletion had to teach the rest of the catalog
+
+Adding `deleted_at` meant auditing every query that means "my library":
+
+- `all_assets()` excludes trash by default — but `reconcile` passes
+  `include_deleted=True`, because those files are still on disk and their placements must
+  stay accurate or purge would not know where to look.
+- `missing_on()` excludes trash, so a newly added drive does not receive photos on their
+  way out.
+- `health` excludes trash, so a deleted photo is never reported as underprotected.
+- `assets_with_phash()` excludes trash, so the duplicate reviewer never offers you a
+  photo you already deleted.
+
+> **The general lesson:** a soft-delete flag is never one column. It is a question asked
+> of every existing read: *does this one mean the library, or the files on disk?* Getting
+> that wrong is how deleted items quietly come back.

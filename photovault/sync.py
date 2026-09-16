@@ -50,7 +50,7 @@ def reconcile(cfg: Config, catalog: Catalog, name: str) -> int:
 
     changed = 0
     with catalog.tx():
-        for asset in catalog.all_assets():
+        for asset in catalog.all_assets(include_deleted=True):
             on_disk = asset["rel_path"] in present
             if wanted is not None and asset["hash"] not in wanted and not on_disk:
                 # Not planned here and not here: simply not this drive's concern.

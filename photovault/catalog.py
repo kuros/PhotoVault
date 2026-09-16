@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS asset (
     added_at    TEXT NOT NULL,
     phash       TEXT,
     width       INTEGER,
-    height      INTEGER
+    height      INTEGER,
+    -- Soft delete. The files stay on every replica until purge, so restoring
+    -- is instant and a misclick is not fatal.
+    deleted_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_asset_captured ON asset(captured_at);
 
@@ -128,11 +131,13 @@ class Catalog:
         have = {r["name"] for r in
                 self.db.execute("PRAGMA table_info(asset)").fetchall()}
         for column, ddl in (("phash", "TEXT"), ("width", "INTEGER"),
-                            ("height", "INTEGER")):
+                            ("height", "INTEGER"), ("deleted_at", "TEXT")):
             if column not in have:
                 self.db.execute(f"ALTER TABLE asset ADD COLUMN {column} {ddl}")
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_asset_phash ON asset(phash)")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_asset_deleted ON asset(deleted_at)")
         self.db.commit()
 
     def close(self) -> None:
@@ -171,8 +176,16 @@ class Catalog:
     def asset(self, hash_: str) -> sqlite3.Row | None:
         return self.db.execute("SELECT * FROM asset WHERE hash = ?", (hash_,)).fetchone()
 
-    def all_assets(self):
-        return self.db.execute("SELECT * FROM asset ORDER BY captured_at").fetchall()
+    def all_assets(self, include_deleted: bool = False):
+        """Assets in the library. Trashed ones are excluded by default.
+
+        `include_deleted=True` is for operations that care about files on disk
+        rather than the library the user sees - reconcile, for one, must keep
+        tracking a trashed photo's copies until it is actually purged.
+        """
+        where = "" if include_deleted else " WHERE deleted_at IS NULL"
+        return self.db.execute(
+            f"SELECT * FROM asset{where} ORDER BY captured_at").fetchall()
 
     def record_source(self, hash_: str, device: str, abs_path: str) -> None:
         self.db.execute(
@@ -228,7 +241,8 @@ class Catalog:
         return self.db.execute(
             """SELECT a.* FROM asset a
                LEFT JOIN placement p ON p.hash = a.hash AND p.replica = ?
-               WHERE p.hash IS NULL OR p.state != 'present'
+               WHERE (p.hash IS NULL OR p.state != 'present')
+                 AND a.deleted_at IS NULL
                ORDER BY a.captured_at""",
             (replica,),
         ).fetchall()
@@ -264,9 +278,10 @@ class Catalog:
         ).fetchone()["n"]
 
     def browse(self, *, year=None, month=None, kind=None, undated=False,
-               limit=200, offset=0):
+               trashed=False, limit=200, offset=0):
         """A page of assets, newest first, with their live copy count."""
         where, params = [], []
+        where.append("a.deleted_at IS " + ("NOT NULL" if trashed else "NULL"))
         if undated:
             where.append("a.captured_at IS NULL")
         else:
@@ -327,8 +342,8 @@ class Catalog:
 
     def assets_with_phash(self):
         return self.db.execute(
-            "SELECT * FROM asset WHERE phash IS NOT NULL AND phash != ''"
-        ).fetchall()
+            "SELECT * FROM asset WHERE phash IS NOT NULL AND phash != '' "
+            "AND deleted_at IS NULL").fetchall()
 
     def set_decision(self, hash_: str, action: str) -> None:
         self.db.execute(
@@ -348,3 +363,29 @@ class Catalog:
         """Forget an asset entirely. Only ever called after its replicas have
         been cleared and a keeper has been verified."""
         self.db.execute("DELETE FROM asset WHERE hash = ?", (hash_,))
+
+
+    # ------------------------------------------------------------------ trash
+
+    def soft_delete(self, hash_: str) -> None:
+        self.db.execute(
+            "UPDATE asset SET deleted_at = ? WHERE hash = ? AND deleted_at IS NULL",
+            (now(), hash_))
+
+    def undelete(self, hash_: str) -> None:
+        self.db.execute(
+            "UPDATE asset SET deleted_at = NULL WHERE hash = ?", (hash_,))
+
+    def trashed(self, older_than: str | None = None):
+        q = "SELECT * FROM asset WHERE deleted_at IS NOT NULL"
+        params: list = []
+        if older_than:
+            q += " AND deleted_at < ?"
+            params.append(older_than)
+        return self.db.execute(q + " ORDER BY deleted_at DESC", params).fetchall()
+
+    def trash_summary(self) -> dict:
+        row = self.db.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(size), 0) b, MIN(deleted_at) oldest "
+            "FROM asset WHERE deleted_at IS NOT NULL").fetchone()
+        return {"files": row["n"], "bytes": row["b"], "oldest": row["oldest"]}

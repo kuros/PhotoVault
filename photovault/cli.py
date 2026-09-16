@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, config, duplicates, health, importer, ingest,
-               placement, sync, verify)
+               placement, sync, trash, verify)
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -380,7 +380,7 @@ def cmd_restore(args) -> int:
     print(f"Restoring to {dest} from: {', '.join(n for n, _ in drivers)}")
 
     done = failed = 0
-    for asset in cat.all_assets():
+    for asset in cat.all_assets():   # trashed photos are not restored
         out = dest / asset["rel_path"]
         if out.exists():
             done += 1
@@ -785,6 +785,107 @@ def cmd_duplicates(args) -> int:
     return 0
 
 
+def _resolve(cat, needles: list[str], *, trashed: bool = False) -> list[str]:
+    """Accept a hash prefix or a path fragment; return matching asset hashes."""
+    rows = cat.trashed() if trashed else cat.all_assets()
+    found, unmatched = [], []
+    for needle in needles:
+        hits = [r["hash"] for r in rows
+                if r["hash"].startswith(needle) or needle in r["rel_path"]]
+        if hits:
+            found.extend(hits)
+        else:
+            unmatched.append(needle)
+    for needle in unmatched:
+        print(f"  {YELLOW}nothing matched {needle!r}{RESET}")
+    return sorted(set(found))
+
+
+def cmd_delete(args) -> int:
+    """Move photos to the trash. Files stay on disk until purged."""
+    cfg, cat = _load(args)
+    hashes = _resolve(cat, args.photo)
+    if not hashes:
+        cat.close()
+        return 1
+
+    print(f"{BOLD}Moving {len(hashes)} photo(s) to the trash:{RESET}")
+    for h in hashes[:20]:
+        a = cat.asset(h)
+        print(f"  {a['rel_path']}  {DIM}{human(a['size'])}{RESET}")
+    if len(hashes) > 20:
+        print(f"  {DIM}...and {len(hashes) - 20} more{RESET}")
+
+    if not args.yes:
+        reply = input(f"\nMove these to the trash? They stay recoverable for "
+                      f"{cfg.trash_days} days. [y/N] ")
+        if reply.strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            cat.close()
+            return 1
+
+    st = trash.delete(cat, hashes)
+    print(f"{GREEN}Moved {st.moved} photo(s) to the trash{RESET} "
+          f"({human(st.bytes)} recoverable for {cfg.trash_days} days)")
+    print(f"{DIM}Restore with 'photovault trash --restore <name>', or free the "
+          f"space with 'photovault trash --purge'.{RESET}")
+    cat.close()
+    return 0
+
+
+def cmd_trash(args) -> int:
+    """List, restore or permanently remove trashed photos."""
+    cfg, cat = _load(args)
+
+    if args.restore:
+        hashes = _resolve(cat, args.restore, trashed=True)
+        n = trash.restore(cat, hashes)
+        print(f"{GREEN}Restored {n} photo(s){RESET}")
+        cat.close()
+        return 0
+
+    if args.purge:
+        rep = trash.purge(cfg, cat, expired_only=not args.all,
+                          dry_run=not args.yes)
+        window = ("everything in the trash" if args.all
+                  else f"items older than {cfg.trash_days} days")
+        if rep.skipped:
+            print(f"{YELLOW}Refusing to purge: {rep.skipped[0][1]}{RESET}")
+            print(f"{DIM}Purging is permanent, so every device must be "
+                  f"connected first.{RESET}")
+            cat.close()
+            return 1
+        verb = "would permanently delete" if not args.yes else "permanently deleted"
+        print(f"{verb} {rep.purged:,} photo(s) ({window}), "
+              f"freeing {human(rep.bytes_freed)}")
+        for err in rep.errors[:10]:
+            print(f"  {RED}{err}{RESET}")
+        if not args.yes and rep.purged:
+            print(f"\n{DIM}This was a preview. Re-run with --yes to delete "
+                  f"for good.{RESET}")
+        cat.close()
+        return 0
+
+    s = trash.summary(cfg, cat)
+    if not s["files"]:
+        print("The trash is empty.")
+        cat.close()
+        return 0
+
+    print(f"{BOLD}Trash{RESET}  {s['files']:,} photos, {human(s['bytes'])}")
+    print(f"{DIM}Kept for {s['retention_days']} days after deletion.{RESET}\n")
+    for row in cat.trashed()[:args.show]:
+        print(f"  {row['deleted_at'][:10]}  {human(row['size']):>9}  "
+              f"{row['rel_path']}")
+    if s["files"] > args.show:
+        print(f"  {DIM}...and {s['files'] - args.show:,} more{RESET}")
+    if s["expiring"]:
+        print(f"\n{YELLOW}{s['expiring']:,} are past the {s['retention_days']}-day "
+              f"window and will be removed by 'photovault trash --purge'.{RESET}")
+    cat.close()
+    return 0
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -937,6 +1038,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true",
                    help="with --apply, actually delete instead of previewing")
     s.set_defaults(func=cmd_duplicates)
+
+    s = sub.add_parser("delete", help="move photos to the trash")
+    s.add_argument("photo", nargs="+",
+                   help="hash prefix or part of a path")
+    s.add_argument("-y", "--yes", action="store_true")
+    s.set_defaults(func=cmd_delete)
+
+    s = sub.add_parser("trash", help="list, restore or permanently remove trash")
+    s.add_argument("--restore", nargs="+", metavar="PHOTO")
+    s.add_argument("--purge", action="store_true",
+                   help="permanently delete (previews unless --yes)")
+    s.add_argument("--all", action="store_true",
+                   help="with --purge, empty the trash rather than only expired items")
+    s.add_argument("--yes", action="store_true")
+    s.add_argument("--show", type=int, default=20)
+    s.set_defaults(func=cmd_trash)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

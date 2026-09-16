@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import config as configmod
-from .. import duplicates, uploads
+from .. import duplicates, trash, uploads
 from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
@@ -128,6 +128,29 @@ class VaultHandler(BaseHTTPRequestHandler):
                 return self._json({"cleared": thumbs.clear_cache()})
             if url.path == "/api/config":
                 return self._save_config(body)
+            if url.path == "/api/photos/delete":
+                hashes = body.get("hashes") or []
+                if not isinstance(hashes, list) or not hashes:
+                    return self._json({"error": "expected a 'hashes' list"}, 400)
+                st = trash.delete(self.catalog, hashes)
+                return self._json({"moved": st.moved, "bytes": st.bytes,
+                                   "retention_days": self.cfg.trash_days})
+            if url.path == "/api/trash/restore":
+                hashes = body.get("hashes") or []
+                return self._json({"restored": trash.restore(self.catalog, hashes)})
+            if url.path == "/api/trash/purge":
+                if not body.get("confirm"):
+                    return self._json({"error": "purging needs an explicit "
+                                                "confirmation"}, 400)
+                rep = trash.purge(self.cfg, self.catalog,
+                                  hashes=body.get("hashes"),
+                                  expired_only=bool(body.get("expired_only")),
+                                  dry_run=False)
+                if rep.skipped and not rep.purged:
+                    return self._json({"error": rep.skipped[0][1]}, 409)
+                return self._json({"purged": rep.purged,
+                                   "bytes_freed": rep.bytes_freed,
+                                   "errors": rep.errors[:10]})
             if url.path == "/api/uploads/discard":
                 return self._json({"discarded": uploads.discard(self.cfg)})
             if url.path == "/api/duplicates/decide":
@@ -228,6 +251,20 @@ class VaultHandler(BaseHTTPRequestHandler):
             return self._json({
                 "months": [dict(r) for r in cat.timeline()],
                 "undated": cat.undated_count(),
+            })
+
+        if name == "trash":
+            rows, total = cat.browse(trashed=True,
+                                     limit=min(500, int(q.get("limit", 120))),
+                                     offset=int(q.get("offset", 0)))
+            return self._json({
+                "total": total, **trash.summary(self.cfg, cat),
+                "photos": [
+                    {"hash": r["hash"], "rel_path": r["rel_path"],
+                     "captured_at": r["captured_at"], "size": r["size"],
+                     "kind": r["media_kind"], "ext": r["ext"],
+                     "deleted_at": r["deleted_at"], "copies": r["copies"]}
+                    for r in rows],
             })
 
         if name == "photos":

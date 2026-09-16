@@ -24,6 +24,7 @@
     <button class="tab" data-view="health" role="tab">Health</button>
     <button class="tab" data-view="activity" role="tab">Activity</button>
     <button class="tab" data-view="duplicates" role="tab">Duplicates</button>
+    <button class="tab" data-view="trash" role="tab">Trash</button>
     <button class="tab" data-view="settings" role="tab">Settings</button>
   </nav>
 
@@ -65,6 +66,7 @@
         <h2 id="gridTitle">All photos</h2>
         <div class="viewbar__right">
           <button id="addPhotos" class="btn btn--sm btn--primary">Add photos</button>
+          <button id="selectMode" class="btn btn--sm">Select</button>
           <div class="segmented" id="kindFilter">
             <button class="is-active" data-kind="">All</button>
             <button data-kind="image">Photos</button>
@@ -73,6 +75,15 @@
           <span id="gridCount" class="muted"></span>
         </div>
       </div>
+      <div id="selectBar" class="selectbar" hidden>
+        <strong id="selectCount"></strong>
+        <span class="dupgroup__actions">
+          <button id="selectAll" class="btn btn--sm btn--ghost">Select all</button>
+          <button id="selectClear" class="btn btn--sm btn--ghost">Clear</button>
+          <button id="selectDelete" class="btn btn--sm btn--danger">Move to trash</button>
+        </span>
+      </div>
+
       <div id="uploadPanel" class="panel panel--card" hidden>
         <div class="panel__head">
           <div>
@@ -155,6 +166,21 @@
       </p>
       <div id="dupGroups" class="dupgroups"></div>
       <button id="dupMore" class="btn btn--wide" hidden>Load more groups</button>
+    </div>
+
+    <!-- TRASH -->
+    <div class="view" data-view="trash">
+      <div class="viewbar">
+        <h2>Trash</h2>
+        <div class="viewbar__right">
+          <span id="trashSummary" class="muted"></span>
+          <button id="trashRestore" class="btn btn--sm" disabled>Restore</button>
+          <button id="trashPurge" class="btn btn--sm btn--danger" disabled>Delete permanently</button>
+        </div>
+      </div>
+      <div id="trashBanner" class="banner" hidden></div>
+      <p class="muted panel__sub" id="trashNote"></p>
+      <div id="trashGrid" class="grid"></div>
     </div>
 
     <!-- SETTINGS -->

@@ -118,6 +118,8 @@ python3 -m photovault status      # am I actually protected?
 | `stop` | Stop the services `start` brought up |
 | `doctor` | What's connected, what's missing, what to do next |
 | `duplicates` | Find near-duplicates; `--apply --yes` to act on your review |
+| `delete <photo>` | Move photos to the trash |
+| `trash` | List, `--restore`, or `--purge` deleted photos |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -467,6 +469,48 @@ then faithfully replicate that corruption everywhere.
 
 ---
 
+## Deleting photos
+
+Every other removal in PhotoVault takes away a *redundant* copy and can be justified by
+proving enough copies remain. Deleting a photo is different: you are asking for the
+thing itself to go, and no check can tell "I meant it" from "I misclicked". So the guard
+is **time**, not proof.
+
+In the UI: **Photos → Select**, tick the photos, **Move to trash**. Or:
+
+```bash
+python3 -m photovault delete 2019/07          # a path fragment or hash prefix
+```
+
+Deleting **changes nothing on disk**. The photo leaves your library, the health report
+and the duplicate scanner, but every copy stays intact and replicated on every device.
+Restoring is a flag flip, not a recovery:
+
+```bash
+python3 -m photovault trash                   # what is in there
+python3 -m photovault trash --restore 2019/07
+```
+
+### Emptying the trash
+
+This is the point of no return.
+
+```bash
+python3 -m photovault trash --purge           # previews expired items
+python3 -m photovault trash --purge --yes     # actually deletes them
+python3 -m photovault trash --purge --all --yes   # empty it completely
+```
+
+Photos are kept for `trash_days` (default 30) before `--purge` will touch them.
+
+**Purging refuses to run while any device is disconnected**, and that refusal is the
+interesting one. Purging with the offline drive in a drawer would delete the file from
+the devices you have, remove it from the catalog, and leave a copy stranded on the drive
+you didn't — a photo that is neither in your library nor cleanly gone, which reappears
+as an orphan the next time you rebuild the catalog from that drive.
+
+---
+
 ## Removing duplicate photos
 
 Byte-identical copies never need removing — content addressing collapses them at import,
@@ -780,9 +824,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-132 tests covering ingest, deduplication, replication, corruption repair, catalog
+149 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, and upload path safety.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, and the trash lifecycle.
 
 ---
 

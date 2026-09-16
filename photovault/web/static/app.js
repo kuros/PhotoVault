@@ -16,11 +16,13 @@ const state = {
   viewerIndex: -1,
   busy: false,
   lastJobSignature: '',
+  selecting: false,
+  selected: new Set(),
 };
 
 const PAGE_TITLES = { photos: 'Photos', health: 'Health',
                       activity: 'Activity', duplicates: 'Duplicates',
-                      settings: 'Settings' };
+                      trash: 'Trash', settings: 'Settings' };
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -186,6 +188,150 @@ async function renderPlan() {
 
 
 
+
+
+/* --------------------------------------------------------- select & delete */
+
+function renderSelection() {
+  const n = state.selected.size;
+  $('#selectBar').hidden = !state.selecting;
+  $('#selectCount').textContent = n
+    ? `${num(n)} selected` : 'Click photos to select them';
+  $('#selectDelete').disabled = n === 0;
+  $('#selectMode').textContent = state.selecting ? 'Done' : 'Select';
+  $('#grid').classList.toggle('is-selecting', state.selecting);
+  $$('#grid .cell').forEach((c) =>
+    c.classList.toggle('is-selected', state.selected.has(c.dataset.hash)));
+}
+
+function attachSelection() {
+  $('#selectMode').addEventListener('click', () => {
+    state.selecting = !state.selecting;
+    if (!state.selecting) state.selected.clear();
+    renderSelection();
+  });
+
+  $('#selectAll').addEventListener('click', () => {
+    state.photos.forEach((p) => state.selected.add(p.hash));
+    renderSelection();
+  });
+
+  $('#selectClear').addEventListener('click', () => {
+    state.selected.clear();
+    renderSelection();
+  });
+
+  $('#selectDelete').addEventListener('click', async () => {
+    const hashes = [...state.selected];
+    if (!hashes.length) return;
+    if (!confirm(`Move ${hashes.length} photo${hashes.length === 1 ? '' : 's'} `
+      + `to the trash?\n\nThey stay recoverable, and no files are removed `
+      + `from your devices until you empty the trash.`)) return;
+    try {
+      const res = await post('photos/delete', { hashes });
+      toast(`Moved ${num(res.moved)} to the trash — recoverable for `
+            + `${res.retention_days} days`);
+      state.selected.clear();
+      state.selecting = false;
+      await Promise.all([loadPhotos(), loadTimeline(), refreshStatus()]);
+      renderSelection();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------- trash */
+
+const trash = { photos: [], selected: new Set() };
+
+function renderTrash(info) {
+  const n = trash.selected.size;
+  $('#trashRestore').disabled = n === 0;
+  $('#trashPurge').disabled = n === 0;
+  $('#trashSummary').textContent = info.files
+    ? `${num(info.files)} photo${info.files === 1 ? '' : 's'} · ${bytes(info.bytes)}`
+    : '';
+  $('#trashNote').innerHTML = info.files
+    ? `Photos stay here for <strong>${info.retention_days} days</strong>, still `
+      + `backed up on every device. ${info.expiring
+        ? `<strong>${num(info.expiring)}</strong> are past that window.` : ''}`
+    : '';
+
+  $('#trashGrid').innerHTML = trash.photos.length
+    ? trash.photos.map((p, i) => {
+        const sel = trash.selected.has(p.hash) ? ' is-selected' : '';
+        return `<button class="cell${sel}" data-hash="${p.hash}" data-i="${i}"
+                        title="${p.rel_path}">
+          <span class="cell__check">✓</span>
+          <img loading="lazy" src="/api/photo/${p.hash}/thumb" alt="">
+          <span class="cell__fallback">${p.ext.toUpperCase()}</span>
+          <span class="cell__date">deleted ${(p.deleted_at || '').slice(0, 10)}</span>
+        </button>`;
+      }).join('')
+    : '<p class="muted">The trash is empty.</p>';
+
+  $('#trashGrid').classList.add('is-selecting');
+  $('#trashGrid').querySelectorAll('img').forEach((img) => {
+    if (img.complete && img.naturalWidth) img.classList.add('is-loaded');
+    img.addEventListener('load', () => img.classList.add('is-loaded'));
+    img.addEventListener('error', () => img.remove());
+  });
+}
+
+async function loadTrash() {
+  let info;
+  try { info = await api('trash'); } catch (err) {
+    $('#trashBanner').hidden = false;
+    $('#trashBanner').className = 'banner banner--bad';
+    $('#trashBanner').textContent = err.message;
+    return;
+  }
+  $('#trashBanner').hidden = true;
+  trash.photos = info.photos;
+  trash.selected = new Set([...trash.selected].filter(
+    (h) => info.photos.some((p) => p.hash === h)));
+  renderTrash(info);
+}
+
+function attachTrash() {
+  $('#trashGrid').addEventListener('click', (e) => {
+    const cell = e.target.closest('.cell');
+    if (!cell) return;
+    const h = cell.dataset.hash;
+    if (trash.selected.has(h)) trash.selected.delete(h);
+    else trash.selected.add(h);
+    loadTrash();
+  });
+
+  $('#trashRestore').addEventListener('click', async () => {
+    const hashes = [...trash.selected];
+    const res = await post('trash/restore', { hashes });
+    toast(`Restored ${num(res.restored)} photo${res.restored === 1 ? '' : 's'}`);
+    trash.selected.clear();
+    loadTrash();
+    refreshStatus();
+  });
+
+  $('#trashPurge').addEventListener('click', async () => {
+    const hashes = [...trash.selected];
+    if (!confirm(`Permanently delete ${hashes.length} photo`
+      + `${hashes.length === 1 ? '' : 's'} from every device?\n\n`
+      + `This cannot be undone. Every device must be connected, or the purge `
+      + `is refused.`)) return;
+    try {
+      const res = await post('trash/purge', { hashes, confirm: true });
+      toast(`Permanently deleted ${num(res.purged)}, freed ${bytes(res.bytes_freed)}`);
+      trash.selected.clear();
+      loadTrash();
+      refreshStatus();
+    } catch (err) {
+      $('#trashBanner').hidden = false;
+      $('#trashBanner').className = 'banner banner--bad';
+      $('#trashBanner').textContent = err.message;
+    }
+  });
+}
 
 /* ----------------------------------------------------------------- uploads */
 
@@ -783,7 +929,10 @@ function renderGrid() {
     else if (p.copies <= 1) badges.push('<span class="badge badge--warn">1 copy</span>');
     if (p.kind === 'video') badges.push('<span class="badge">video</span>');
     const date = p.captured_at ? p.captured_at.slice(0, 10) : 'no date';
-    return `<button class="cell" data-i="${i}" title="${p.rel_path}">
+    const sel = state.selected.has(p.hash) ? ' is-selected' : '';
+    return `<button class="cell${sel}" data-i="${i}" data-hash="${p.hash}"
+                    title="${p.rel_path}">
+      <span class="cell__check">✓</span>
       <img loading="lazy" src="/api/photo/${p.hash}/thumb" alt="">
       <span class="cell__fallback">${p.ext.toUpperCase()}</span>
       <span class="cell__badges">${badges.join('')}</span>
@@ -799,6 +948,7 @@ function renderGrid() {
     img.addEventListener('error', () => img.remove());
   });
 
+  $('#grid').classList.toggle('is-selecting', state.selecting);
   $('#loadMore').hidden = state.photos.length >= state.total;
 }
 
@@ -941,6 +1091,7 @@ function switchView(view) {
   if (view === 'health') refreshStatus();
   if (view === 'activity') { refreshJobs(); loadEvents(); }
   if (view === 'duplicates') loadDuplicates();
+  if (view === 'trash') loadTrash();
   if (view === 'settings') loadSettings().catch((e) => banner(e.message, 'bad'));
 }
 
@@ -948,6 +1099,8 @@ function attach() {
   attachSettings();
   attachDuplicates();
   attachUploads();
+  attachSelection();
+  attachTrash();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 
@@ -984,7 +1137,14 @@ function attach() {
 
   $('#grid').addEventListener('click', (e) => {
     const cell = e.target.closest('.cell');
-    if (cell) openViewer(Number(cell.dataset.i));
+    if (!cell) return;
+    if (state.selecting) {
+      const h = cell.dataset.hash;
+      if (state.selected.has(h)) state.selected.delete(h);
+      else state.selected.add(h);
+      return renderSelection();
+    }
+    openViewer(Number(cell.dataset.i));
   });
 
   $('#loadMore').addEventListener('click', () => loadPhotos(true));
