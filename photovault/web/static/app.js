@@ -79,7 +79,7 @@ async function refreshStatus() {
   }
 
   renderDevices(s);
-  if (state.view === 'health') renderHealth(s);
+  if (state.view === 'health') { renderHealth(s); renderPlan(); }
   return s;
 }
 
@@ -142,6 +142,43 @@ function renderHealth(s) {
       <td class="num">${r.corrupt ? `<span style="color:var(--bad)">${num(r.corrupt)}</span>` : '0'}</td>
       <td class="num">${bytes(r.bytes)}</td>
     </tr>`).join('')}</tbody>`;
+}
+
+async function renderPlan() {
+  const panel = $('#storagePanel');
+  let p;
+  try { p = await api('plan'); } catch { panel.hidden = true; return; }
+
+  if (!p.sharded) {
+    panel.hidden = false;
+    $('#storageSub').textContent =
+      `Every device holds a complete copy. Any one of them can restore your `
+      + `whole library on its own.`;
+    $('#storageBars').innerHTML = '';
+    return;
+  }
+
+  panel.hidden = false;
+  $('#storageSub').innerHTML = p.ok
+    ? `Sharded: photos are split across devices, ${p.shard_copies_needed} shard `
+      + `cop${p.shard_copies_needed === 1 ? 'y' : 'ies'} each. `
+      + `<strong>No single drive is complete</strong> — restoring needs all of them.`
+    : `<span style="color:var(--bad)">${num(p.unplaceable)} photos cannot reach `
+      + `full redundancy — the drives are too small.</span>`;
+
+  $('#storageBars').innerHTML = p.replicas.map((r) => {
+    const pct = r.fill === null ? null : Math.min(100, r.fill * 100);
+    const colour = pct === null ? 'var(--muted)'
+      : pct > 95 ? 'var(--bad)' : pct > 80 ? 'var(--warn)' : 'var(--ok)';
+    const cap = r.capacity ? bytes(r.capacity) : 'unknown';
+    return `<div class="hrow">
+      <span class="hrow__label">${r.name}</span>
+      <span class="hrow__track"><span class="hrow__bar"
+        style="width:${pct ?? 0}%;background:${colour}"></span></span>
+      <span class="hrow__n" title="${num(r.files)} files of ${cap}">
+        ${pct === null ? '—' : pct.toFixed(0) + '%'}</span>
+    </div>`;
+  }).join('');
 }
 
 /* ---------------------------------------------------------------- timeline */

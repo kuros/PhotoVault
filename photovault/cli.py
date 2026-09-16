@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, config, health, ingest, sync, verify
+from . import __version__, config, health, ingest, placement, sync, verify
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -56,6 +56,13 @@ def cmd_init(args) -> int:
     print("  3. photovault ingest        # import into the primary library")
     print("  4. photovault sync --all    # fan out to every other device")
     return 0
+
+
+def cmd_setup(args) -> int:
+    """Interactive setup: choose a storage model and write the config."""
+    from . import wizard
+    path = Path(args.config).expanduser() if args.config else config.DEFAULT_CONFIG_PATH
+    return wizard.run(path, force=args.force)
 
 
 def cmd_replicas(args) -> int:
@@ -359,20 +366,50 @@ def cmd_restore(args) -> int:
 
 
 def cmd_rebuild(args) -> int:
-    """Recover a lost or damaged catalog from the files on a replica."""
+    """Recover a lost or damaged catalog from the files on one or more replicas.
+
+    With sharding no single drive is complete, so recovery must read every
+    drive it can reach. --all does that.
+    """
     cfg, cat = _load(args)
-    try:
-        n = sync.rebuild_from(cfg, cat, args.replica,
-                              progress=lambda f: print(f"  ...{f} recovered",
-                                                       end="\r", flush=True))
-    except (ReplicaError, KeyError) as exc:
-        print(f"{RED}{exc}{RESET}")
+    if args.all:
+        targets = [r.name for r in cfg.replicas if r.kind == "local"]
+    elif args.replica:
+        targets = [args.replica]
+    else:
+        print("Name a replica, or pass --all to read every drive you can reach.")
         return 1
-    print(f"Recovered {n:,} assets from {args.replica}        ")
-    others = [r.name for r in cfg.replicas if r.name != args.replica]
-    if others:
-        print(f"{DIM}Now run 'photovault reconcile --all' to re-learn what "
-              f"{', '.join(others)} hold.{RESET}")
+
+    total, reached, skipped = 0, [], []
+    for name in targets:
+        try:
+            n = sync.rebuild_from(cfg, cat, name,
+                                  progress=lambda f, _n=name: print(
+                                      f"  {_n}: ...{f} recovered", end="\r",
+                                      flush=True))
+        except (ReplicaError, KeyError) as exc:
+            skipped.append((name, str(exc)))
+            continue
+        print(f"  {name}: {n:,} assets              ")
+        total += n
+        reached.append(name)
+
+    if not reached:
+        print(f"{RED}No replica could be read.{RESET}")
+        for name, why in skipped:
+            print(f"  {name}: {why}")
+        return 1
+
+    unique = cat.db.execute("SELECT COUNT(*) n FROM asset").fetchone()["n"]
+    print(f"\nRecovered {unique:,} distinct photos from {', '.join(reached)}")
+    for name, why in skipped:
+        print(f"  {YELLOW}skipped {name}: {why}{RESET}")
+
+    if cfg.sharded and skipped:
+        print(f"{YELLOW}Some drives were unreadable. With sharding no single "
+              f"drive is complete,\nso photos that lived only on those may be "
+              f"missing. Connect them and re-run.{RESET}")
+    print(f"{DIM}Now run 'photovault reconcile --all'.{RESET}")
     cat.close()
     return 0
 
@@ -384,6 +421,92 @@ def cmd_ui(args) -> int:
     cat.close()  # the server opens its own per-thread connections
     serve(cfg, host=args.host, port=args.port, open_browser=not args.no_browser)
     return 0
+
+
+def cmd_plan(args) -> int:
+    """Show where each photo would live, and whether the drives are big enough."""
+    cfg, cat = _load(args)
+    if not cfg.sharded:
+        print(f"Every replica holds a {BOLD}complete copy{RESET}. "
+              f"Nothing to split.\n")
+        print(f"{DIM}To spread the library across drives that are each too small "
+              f"for it,\nmark them mode = \"shard\" in your config, or run "
+              f"'photovault setup'.{RESET}")
+        cat.close()
+        return 0
+
+    plan = placement.build_plan(cfg, cat)
+    print(f"{BOLD}Library{RESET}  {len(plan.assignments):,} photos, "
+          f"{human(plan.total_bytes)}")
+    print(f"{BOLD}Target{RESET}   {cfg.min_copies} copies "
+          f"({len(cfg.full_replicas)} full replica"
+          f"{'s' if len(cfg.full_replicas) != 1 else ''} + "
+          f"{plan.shard_copies_needed} from shards)\n")
+
+    print(f"{BOLD}{'replica':<12}{'mode':<8}{'files':>10}{'size':>11}"
+          f"{'capacity':>11}  fill{RESET}")
+    for name, s in plan.per_replica.items():
+        cap = human(s["capacity"]) if s["capacity"] else "unknown"
+        if s["fill"] is None:
+            bar = f"{DIM}?{RESET}"
+        else:
+            pct = s["fill"] * 100
+            colour = RED if pct > 95 else YELLOW if pct > 80 else GREEN
+            filled = min(20, round(min(pct, 100) / 5))
+            bar = f"{colour}{'#' * filled}{'.' * (20 - filled)} {pct:5.1f}%{RESET}"
+        tag = f" {DIM}(offline){RESET}" if s["offline"] else ""
+        print(f"{name:<12}{s['mode']:<8}{s['files']:>10,}{human(s['bytes']):>11}"
+              f"{cap:>11}  {bar}{tag}")
+
+    print()
+    if plan.ok:
+        print(f"  {GREEN}OK{RESET}   every photo fits with "
+              f"{cfg.min_copies} copies")
+    else:
+        short = len(plan.unplaceable)
+        print(f"  {RED}FAIL{RESET} {short:,} photos cannot reach "
+              f"{cfg.min_copies} copies - not enough space")
+        need = plan.total_bytes * plan.shard_copies_needed
+        have = sum(s["capacity"] or 0 for n, s in plan.per_replica.items()
+                   if s["mode"] == "shard")
+        print(f"       shards hold {human(have)}, need about {human(need)}")
+        print(f"{DIM}       Add another drive, or lower min_copies.{RESET}")
+    cat.close()
+    return 0 if plan.ok else 2
+
+
+def cmd_rebalance(args) -> int:
+    """Reclaim space on a shard after the drive line-up changed."""
+    cfg, cat = _load(args)
+    targets = ([r.name for r in cfg.shard_replicas] if args.all else args.replica)
+    if not targets:
+        print("Name a shard replica, or pass --all.")
+        return 1
+    if not cfg.sharded:
+        print("No shard replicas configured - nothing to rebalance.")
+        return 1
+
+    rc = 0
+    for name in targets:
+        print(f"\n{BOLD}{name}{RESET}")
+        try:
+            st = sync.rebalance(cfg, cat, name, dry_run=not args.apply)
+        except (ReplicaError, KeyError) as exc:
+            print(f"  {RED}{exc}{RESET}")
+            rc = 1
+            continue
+        verb = "would remove" if not args.apply else "removed"
+        print(f"  {verb} {st.removed:,} files, freeing {human(st.bytes_freed)}")
+        if st.kept_unsafe:
+            print(f"  {YELLOW}kept {st.kept_unsafe:,} that could not be safely "
+                  f"removed{RESET}")
+        for note in st.notes[:10]:
+            print(f"    {DIM}{note}{RESET}")
+    if not args.apply:
+        print(f"\n{DIM}This was a preview. Re-run with --apply to actually "
+              f"delete.{RESET}")
+    cat.close()
+    return rc
 
 
 def cmd_log(args) -> int:
@@ -407,6 +530,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="write a starter config file")
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("setup", help="interactive setup - pick how drives store photos")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_setup)
 
     s = sub.add_parser("replicas", help="list configured devices and reachability")
     s.set_defaults(func=cmd_replicas)
@@ -448,8 +575,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_restore)
 
     s = sub.add_parser("rebuild",
-                       help="recover a lost catalog by re-reading a replica")
-    s.add_argument("replica")
+                       help="recover a lost catalog by re-reading replicas")
+    s.add_argument("replica", nargs="?")
+    s.add_argument("--all", action="store_true",
+                   help="read every local replica (required when sharded)")
     s.set_defaults(func=cmd_rebuild)
 
     s = sub.add_parser("ui", help="open the web interface in your browser")
@@ -465,6 +594,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("replica")
     s.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
     s.set_defaults(func=cmd_adopt)
+
+    s = sub.add_parser("plan", help="preview how the library splits across drives")
+    s.set_defaults(func=cmd_plan)
+
+    s = sub.add_parser("rebalance",
+                       help="reclaim space on a shard after the drives changed")
+    s.add_argument("replica", nargs="*")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--apply", action="store_true",
+                   help="actually delete; without this it only previews")
+    s.set_defaults(func=cmd_rebalance)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

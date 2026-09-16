@@ -62,6 +62,9 @@ python3 -m photovault status      # am I actually protected?
 | `restore <folder>` | Rebuild a complete library into a fresh folder |
 | `replicas` | Which devices are configured and reachable right now |
 | `adopt <replica>` | Re-register a genuinely replaced drive |
+| `setup` | Interactive setup — pick full copies or sharding |
+| `plan` | Preview how the library splits across drives |
+| `rebalance` | Reclaim space on a shard after the drives changed |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -187,12 +190,99 @@ drives more than 30 days behind:
 Plug in 'hdd2' next - it is 47 days behind.
 ```
 
-### What this does *not* do
+---
 
-Every replica holds a **complete** copy. If your library outgrows a single drive,
-PhotoVault will not split it across two — that's a different design (sharding), and it
-trades away the property that any one drive is independently complete and readable
-without the others. Ask if you need it.
+## Choosing how drives store your photos
+
+Run the guided setup — it detects your drives, asks what you want, shows the
+consequence, and writes the config:
+
+```bash
+python3 -m photovault setup
+```
+
+There are two models, and the choice is a genuine trade rather than a right answer:
+
+| | **Full copies** | **Sharded** |
+|---|---|---|
+| Each drive holds | everything | a computed subset |
+| To restore you need | **any one drive** | **all the drives** |
+| Drive size needed | as big as the library | combined, bigger than the library |
+| Good when | drives are big enough | no single drive fits the library |
+
+Full copies are safer and simpler — pick them unless your library genuinely doesn't fit.
+The setup wizard recommends sharding only when it measures that it won't.
+
+### Sharding
+
+Mark drives as shards and give them a capacity:
+
+```toml
+[[replica]]
+name = "hdd1"
+kind = "local"
+root = "/Volumes/Backup1/PhotoVault/library"
+offline = true
+mode = "shard"
+capacity = "auto"      # or "500GB"
+```
+
+Your Mac stays a `full` replica — the primary has to be, because ingest needs somewhere
+to write every new photo before it's distributed. The shards then supply whatever
+redundancy is still missing, so `min_copies = 3` with one full replica means each photo
+lands on two shards.
+
+Preview before you commit:
+
+```bash
+python3 -m photovault plan
+```
+
+```
+Library  184,302 photos, 847.1 GB
+Target   3 copies (1 full replica + 2 from shards)
+
+replica     mode         files       size   capacity  fill
+hdd1        shard        61,203   281.4 GB   450.0 GB  ############........  62.5%
+hdd2        shard        61,544   283.0 GB   450.0 GB  ############........  62.9%
+hdd3        shard        61,555   282.7 GB   450.0 GB  ############........  62.8%
+mac         full        184,302   847.1 GB     1.6 TB  ##########..........  51.7%
+
+  OK   every photo fits with 3 copies
+```
+
+If it doesn't fit, `plan` says so and exits non-zero rather than silently leaving photos
+underprotected.
+
+### Adding or removing a drive
+
+Placement uses **rendezvous hashing**, which means adding a fourth drive moves only about
+a quarter of your photos rather than reshuffling everything. On a 1 TB library that's the
+difference between hours and days.
+
+```bash
+python3 -m photovault sync --all        # copy to the new drive first
+python3 -m photovault rebalance --all   # preview what is now surplus
+python3 -m photovault rebalance --all --apply
+```
+
+**`rebalance` is the only command in PhotoVault that deletes a photo**, so it defaults to
+a preview and re-reads `min_copies` other copies — hashing them, not trusting the
+database — before removing anything. It also, by design, can only ever remove an
+*over-replicated* copy: deletion requires `min_copies` to remain. That's why you sync
+first and rebalance second.
+
+### Recovery is different when sharded
+
+No single drive is complete, so recovery must read them all:
+
+```bash
+python3 -m photovault rebuild --all
+python3 -m photovault reconcile --all
+```
+
+Each sharded drive's `RECOVERY.md` says so in capitals, lists its sibling drives, and
+tells whoever finds it not to mistake it for a full backup.
 
 ---
 
@@ -369,9 +459,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-46 tests covering ingest, deduplication, replication, corruption repair, catalog
+59 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, and multi-drive identity safety.
+path-traversal defence, multi-drive identity safety, sharded placement, and the delete path.
 
 ---
 

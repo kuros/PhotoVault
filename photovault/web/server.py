@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .. import health, sync
+from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
 from . import thumbs
@@ -124,6 +124,20 @@ class VaultHandler(BaseHTTPRequestHandler):
                 "healthy": h.ok,
                 "busy": self.jobs.running,
                 "thumbs": {**thumbs.backends(), "usable": thumbs.available()},
+            })
+
+        if name == "plan":
+            if not self.cfg.sharded:
+                return self._json({"sharded": False,
+                                   "replicas": [r.name for r in self.cfg.replicas]})
+            p = placement.build_plan(self.cfg, cat)
+            return self._json({
+                "sharded": True, "ok": p.ok,
+                "total_bytes": p.total_bytes,
+                "total_photos": len(p.assignments),
+                "shard_copies_needed": p.shard_copies_needed,
+                "unplaceable": len(p.unplaceable),
+                "replicas": [{"name": n, **s} for n, s in p.per_replica.items()],
             })
 
         if name == "timeline":

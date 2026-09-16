@@ -344,3 +344,58 @@ Writing the check was the easy part. Running the scenario found two holes in it:
 > **The general lesson:** a safety check has to be tested against the situation it
 > guards, not just reviewed for plausibility. Both holes were invisible when reading
 > the code and obvious within seconds of running the scenario.
+
+
+---
+
+## Decision 9: sharding is a second model, not a replacement
+
+When a library outgrows any single drive, the drives have to hold subsets. That breaks
+the property that made recovery so simple — *any one drive restores everything* — so
+sharding was added **beside** full copies rather than instead of them, and the setup
+wizard recommends it only when it measures that full copies will not fit.
+
+> **The general lesson:** when a new requirement conflicts with a property you already
+> promised, the choice is not "which is better" but "who decides". Both modes exist
+> because the answer depends on hardware the program cannot see.
+
+### Rendezvous hashing, and why not modulo
+
+The obvious placement is `hash(photo) % drive_count`. It is balanced, deterministic and
+one line long. It is also close to unusable, because adding a fourth drive changes the
+answer for nearly every photo — on a 1 TB library, days of copying to add one drive.
+
+Weighted rendezvous hashing scores every drive from the photo's hash plus the drive's
+name and takes the highest scorers. Same determinism, same balance, but adding an Nth
+drive moves only about 1/N of the photos. There is a test asserting exactly that, because
+it is the whole reason for the more complicated algorithm:
+
+```python
+def test_adding_a_drive_moves_only_a_fraction(self):
+```
+
+> **The general lesson:** "deterministic and balanced" is table stakes. The property
+> worth paying complexity for is what happens *when the inputs change* — and that is the
+> one the obvious implementation gets wrong.
+
+### Deleting is the one thing that needs paranoia
+
+`rebalance` is the only operation in PhotoVault that removes a photo, and it makes three
+concessions the rest of the program does not:
+
+1. **It defaults to a dry run.** You have to pass `--apply`.
+2. **It re-reads and re-hashes surviving copies** rather than trusting the catalog. A
+   placement row saying `present` is a belief; deleting a photo because of a stale belief
+   is exactly the failure this program exists to prevent.
+3. **It can only remove an over-replicated copy.** Deletion requires `min_copies` to
+   *remain*, so with exactly `min_copies` there is nothing to give up.
+
+Point 3 emerged from a failing test. I had written a test asserting rebalance would
+refuse an unsafe delete, set it up with exactly `min_copies` copies, and it reported
+nothing to delete at all. My first instinct was that the test setup was wrong — it was —
+but working out *why* surfaced the real invariant, which is now documented in the
+workflow: sync first, rebalance second.
+
+> **The general lesson:** when a test fails for a reason you did not predict, the
+> explanation is worth more than the fix. This one turned an accident of the
+> implementation into a stated guarantee.

@@ -14,9 +14,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from photovault import health, identity, ingest, sync, verify
+from photovault import (health, identity, ingest, placement, sync,
+                        verify)
 from photovault.catalog import Catalog
 from photovault.config import Config, ReplicaSpec, SourceSpec
+from photovault.replicas import ReplicaError
 
 from make_fixtures import build as build_fixtures
 
@@ -447,3 +449,225 @@ class TestMultipleDrives(VaultTestCase):
         _, days = identity.staleness(self.cat, "hdd")
         self.assertEqual(days, 0)
         self.assertEqual(identity.staleness(self.cat, "hdd2"), (None, None))
+
+
+class ShardTestCase(VaultTestCase):
+    """A library split across drives too small to each hold all of it."""
+
+    CAPACITY = "1MB"
+
+    def setUp(self):
+        super().setUp()
+        self.cfg.replicas = [
+            ReplicaSpec("mac", "local", str(self.tmp / "mac")),
+            ReplicaSpec("s1", "local", str(self.tmp / "s1"), offline=True,
+                        mode="shard", capacity=self.CAPACITY),
+            ReplicaSpec("s2", "local", str(self.tmp / "s2"), offline=True,
+                        mode="shard", capacity=self.CAPACITY),
+            ReplicaSpec("s3", "local", str(self.tmp / "s3"), offline=True,
+                        mode="shard", capacity=self.CAPACITY),
+        ]
+        self.cfg.min_copies = 3
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+
+    def sync_all(self):
+        for name in ("s1", "s2", "s3"):
+            sync.push(self.cfg, self.cat, name)
+
+
+class TestSharding(ShardTestCase):
+    def test_every_photo_still_reaches_min_copies(self):
+        self.ingest_all()
+        self.sync_all()
+        h = health.assess(self.cfg, self.cat)
+        self.assertEqual(h.underprotected, 0)
+        self.assertEqual(h.no_offline_copy, 0)
+        self.assertTrue(h.ok)
+
+    def test_shards_hold_subsets_not_the_whole_library(self):
+        self.ingest_all()
+        self.sync_all()
+        held = {n: len(list((self.tmp / n).rglob("*.jpg")))
+                for n in ("s1", "s2", "s3")}
+        self.assertTrue(all(0 < v < 13 for v in held.values()),
+                        f"each shard should hold a proper subset, got {held}")
+        # mac is full, plus two shard copies each = 13 * 2 across the shards.
+        self.assertEqual(sum(held.values()), 26)
+
+    def test_placement_is_deterministic(self):
+        self.ingest_all()
+        first = placement.build_plan(self.cfg, self.cat).assignments
+        second = placement.build_plan(self.cfg, self.cat).assignments
+        self.assertEqual(first, second)
+
+    def test_adding_a_drive_moves_only_a_fraction(self):
+        """Rendezvous hashing's real payoff: `hash % n` would move nearly
+        everything, which on a 1 TB library is days of copying."""
+        self.ingest_all()
+        before = placement.build_plan(self.cfg, self.cat).assignments
+
+        self.cfg.replicas.append(
+            ReplicaSpec("s4", "local", str(self.tmp / "s4"), offline=True,
+                        mode="shard", capacity=self.CAPACITY))
+        after = placement.build_plan(self.cfg, self.cat).assignments
+
+        moved = sum(1 for h in before if before[h] != after[h])
+        self.assertLess(moved, len(before) * 0.75,
+                        "adding a 4th drive should not reshuffle everything")
+
+    def test_plan_reports_when_drives_are_too_small(self):
+        for spec in self.cfg.shard_replicas:
+            spec.capacity = "2KB"
+        self.ingest_all()
+        plan = placement.build_plan(self.cfg, self.cat)
+        self.assertFalse(plan.ok)
+        self.assertTrue(plan.unplaceable)
+
+    def test_primary_may_not_be_a_shard(self):
+        """Ingest needs somewhere to write every new photo."""
+        import tomllib
+        from photovault import config as cfgmod
+        path = self.tmp / "bad.toml"
+        path.write_text('''
+[vault]
+primary = "mac"
+[[replica]]
+name = "mac"
+kind = "local"
+root = "/tmp/x"
+mode = "shard"
+''')
+        with self.assertRaises(ValueError):
+            cfgmod.load(path)
+
+
+class TestShardRecovery(ShardTestCase):
+    def test_one_shard_alone_cannot_rebuild_the_catalog(self):
+        self.ingest_all()
+        self.sync_all()
+        self.cat.close()
+        self.cfg.catalog_path.unlink()
+        self.cat = Catalog(self.cfg.catalog_path)
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+        recovered = sync.rebuild_from(self.cfg, self.cat, "s1")
+        self.assertLess(recovered, 13, "a shard is not a complete backup")
+
+    def test_all_shards_together_rebuild_everything(self):
+        self.ingest_all()
+        self.sync_all()
+        expected = {a["hash"] for a in self.cat.all_assets()}
+
+        # The Mac dies: full copy and catalog gone at once.
+        self.cat.close()
+        shutil.rmtree(self.tmp / "mac")
+        self.cfg.catalog_path.unlink()
+        for suffix in ("-wal", "-shm"):
+            Path(str(self.cfg.catalog_path) + suffix).unlink(missing_ok=True)
+
+        self.cat = Catalog(self.cfg.catalog_path)
+        for spec in self.cfg.replicas:
+            self.cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                    is_offline=spec.offline)
+        for name in ("s1", "s2", "s3"):
+            sync.rebuild_from(self.cfg, self.cat, name)
+        self.assertEqual({a["hash"] for a in self.cat.all_assets()}, expected)
+
+        for name in ("mac", "s1", "s2", "s3"):
+            sync.reconcile(self.cfg, self.cat, name)
+        sync.push(self.cfg, self.cat, "mac")
+        self.assertEqual(len(list((self.tmp / "mac").rglob("*.jpg"))), 13)
+        self.assertTrue(health.assess(self.cfg, self.cat).ok)
+
+    def test_shard_recovery_kit_says_it_is_partial(self):
+        self.ingest_all()
+        self.sync_all()
+        text = (self.tmp / "s1" / "RECOVERY.md").read_text()
+        self.assertIn("ONLY PART", text)
+        self.assertIn("rebuild --all", text)
+        # The full replica must NOT carry that warning.
+        sync.push(self.cfg, self.cat, "mac")
+        self.assertNotIn("ONLY PART", (self.tmp / "mac" / "RECOVERY.md").read_text())
+
+
+class TestRebalanceSafety(ShardTestCase):
+    def test_rebalance_defaults_to_a_preview(self):
+        self.ingest_all()
+        self.sync_all()
+        before = len(list((self.tmp / "s1").rglob("*.jpg")))
+        self.cfg.replicas.append(
+            ReplicaSpec("s4", "local", str(self.tmp / "s4"), offline=True,
+                        mode="shard", capacity=self.CAPACITY))
+        self.cat.upsert_replica("s4", "local", str(self.tmp / "s4"), is_offline=True)
+        sync.push(self.cfg, self.cat, "s4")
+
+        sync.rebalance(self.cfg, self.cat, "s1")   # dry run by default
+        self.assertEqual(len(list((self.tmp / "s1").rglob("*.jpg"))), before,
+                         "a dry run must not delete anything")
+
+    def test_rebalance_removes_only_surplus_and_keeps_totals_right(self):
+        self.ingest_all()
+        self.sync_all()
+        self.cfg.replicas.append(
+            ReplicaSpec("s4", "local", str(self.tmp / "s4"), offline=True,
+                        mode="shard", capacity=self.CAPACITY))
+        self.cat.upsert_replica("s4", "local", str(self.tmp / "s4"), is_offline=True)
+        sync.push(self.cfg, self.cat, "s4")
+        for name in ("s1", "s2", "s3", "s4"):
+            sync.rebalance(self.cfg, self.cat, name, dry_run=False)
+
+        total = sum(len(list((self.tmp / n).rglob("*.jpg")))
+                    for n in ("s1", "s2", "s3", "s4"))
+        self.assertEqual(total, 26, "13 photos x 2 shard copies")
+        self.assertTrue(health.assess(self.cfg, self.cat).ok)
+
+    def test_never_deletes_when_copies_cannot_be_verified(self):
+        """The only destructive operation must refuse on stale beliefs.
+
+        A placement row saying "present" is a belief. Deleting a photo because
+        of a belief that is no longer true is exactly the failure this whole
+        program exists to prevent, so surviving copies are re-read and
+        re-hashed before anything is removed.
+        """
+        self.ingest_all()
+        self.sync_all()
+
+        # Add a drive and sync it, so some photos now have a spare copy. Only
+        # an over-replicated photo can ever be removed: deletion requires
+        # min_copies to REMAIN, so with exactly min_copies there is nothing to
+        # give up. This is why the workflow is sync first, rebalance second.
+        self.cfg.replicas.append(
+            ReplicaSpec("s4", "local", str(self.tmp / "s4"), offline=True,
+                        mode="shard", capacity=self.CAPACITY))
+        self.cat.upsert_replica("s4", "local", str(self.tmp / "s4"), is_offline=True)
+        sync.push(self.cfg, self.cat, "s4")
+
+        preview = sync.rebalance(self.cfg, self.cat, "s1")
+        self.assertGreater(preview.removed, 0, "test needs surplus to exist")
+
+        # Destroy every other copy while the catalog still believes in them.
+        shutil.rmtree(self.tmp / "mac")
+        for name in ("s2", "s3", "s4"):
+            if (self.tmp / name).exists():
+                shutil.rmtree(self.tmp / name)
+        still_believed = self.cat.db.execute(
+            "SELECT COUNT(*) n FROM placement WHERE state='present' "
+            "AND replica != 's1'").fetchone()["n"]
+        self.assertGreater(still_believed, 0,
+                           "the catalog should still believe those copies exist")
+
+        before = sorted(p.name for p in (self.tmp / "s1").rglob("*.jpg"))
+        st = sync.rebalance(self.cfg, self.cat, "s1", dry_run=False)
+        after = sorted(p.name for p in (self.tmp / "s1").rglob("*.jpg"))
+
+        self.assertEqual(st.removed, 0, "nothing may be deleted")
+        self.assertGreater(st.kept_unsafe, 0)
+        self.assertEqual(before, after, "no photo may be deleted unverified")
+
+    def test_rebalance_refuses_on_a_full_replica(self):
+        self.ingest_all()
+        with self.assertRaises(ReplicaError):
+            sync.rebalance(self.cfg, self.cat, "mac")

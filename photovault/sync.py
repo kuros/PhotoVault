@@ -11,6 +11,7 @@ from .catalog import Catalog
 from .config import Config
 from .identity import mark_synced, verify as verify_identity
 from .mediatime import normalize_ext
+from .placement import planned_for
 from .replicas import Driver, LocalDriver, ReplicaError, driver_for
 
 
@@ -42,10 +43,22 @@ def reconcile(cfg: Config, catalog: Catalog, name: str) -> int:
     verify_identity(cfg, catalog, name, drv)
 
     present = drv.list_present()
+    # A shard is only responsible for its planned subset. Without this, every
+    # photo that correctly lives on another drive would be recorded as
+    # "missing" here and the health report would be nonsense.
+    wanted = planned_for(cfg, catalog, name)
+
     changed = 0
     with catalog.tx():
         for asset in catalog.all_assets():
-            state = "present" if asset["rel_path"] in present else "missing"
+            on_disk = asset["rel_path"] in present
+            if wanted is not None and asset["hash"] not in wanted and not on_disk:
+                # Not planned here and not here: simply not this drive's concern.
+                catalog.db.execute(
+                    "DELETE FROM placement WHERE hash = ? AND replica = ?",
+                    (asset["hash"], name))
+                continue
+            state = "present" if on_disk else "missing"
             existing = catalog.db.execute(
                 "SELECT state FROM placement WHERE hash=? AND replica=?",
                 (asset["hash"], name),
@@ -75,6 +88,10 @@ def push(cfg: Config, catalog: Catalog, name: str, *, limit: int | None = None,
         drv.ensure_root()
 
     missing = catalog.missing_on(name)
+    # A shard holds only its planned subset, not everything.
+    wanted = planned_for(cfg, catalog, name)
+    if wanted is not None:
+        missing = [a for a in missing if a["hash"] in wanted]
     if limit:
         missing = missing[:limit]
 
@@ -201,11 +218,23 @@ def local_copy(cfg: Config, catalog: Catalog, hash_: str, rel_path: str) -> Path
     return _local_source(cfg, catalog, hash_, rel_path, exclude="")
 
 
-RECOVERY_DOC = """# How to recover these photos
+SHARD_WARNING = """
+!! THIS DRIVE HOLDS ONLY PART OF THE LIBRARY !!
 
-This drive holds a complete copy of a PhotoVault photo library. The photos are
-ordinary files in dated folders - you do not need PhotoVault to read them. Open
-`library/` in Finder or Explorer and everything is there.
+This vault is sharded: the photos are split across several drives, and this
+one is not complete on its own. It holds {count} of {total} photos. Restoring
+everything needs all of these:
+
+{siblings}
+
+The photos that are here are ordinary files you can open directly - but do not
+mistake this drive for a full backup.
+"""
+
+RECOVERY_DOC = """# How to recover these photos
+{shard_notice}
+The photos here are ordinary files in dated folders. You do not need PhotoVault
+to read them: open `library/` in Finder or Explorer and they are right there.
 
 To rebuild the full system on a replacement computer:
 
@@ -218,7 +247,7 @@ To rebuild the full system on a replacement computer:
 
 3. Rebuild the catalog from this drive, then re-learn the other devices:
 
-       python3 -m photovault rebuild {replica}
+       python3 -m photovault {rebuild_cmd}
        python3 -m photovault reconcile --all
 
 4. Refill the new primary computer, and verify every byte:
@@ -230,7 +259,7 @@ To rebuild the full system on a replacement computer:
 Step 4 should end with four OK lines. If it does, nothing was lost.
 
 ---
-Library: {count} files, {size}
+This drive: {count} files, {size}
 Devices in this vault: {replicas}
 Written by PhotoVault on {when}
 """
@@ -251,9 +280,23 @@ def write_recovery_kit(cfg: Config, catalog: Catalog, name: str) -> bool:
     if not drv.available():
         return False
 
-    row = catalog.db.execute(
-        "SELECT COUNT(*) n, COALESCE(SUM(size), 0) b FROM asset").fetchone()
-    size = row["b"]
+    # A sharded drive must describe what IT holds, not the whole library, or
+    # whoever finds it will think a partial drive is a complete backup.
+    from .placement import planned_for
+    wanted = planned_for(cfg, catalog, name)
+    if wanted is None:
+        row = catalog.db.execute(
+            "SELECT COUNT(*) n, COALESCE(SUM(size), 0) b FROM asset").fetchone()
+        count, size = row["n"], row["b"]
+    else:
+        held = catalog.db.execute(
+            """SELECT COUNT(*) n, COALESCE(SUM(a.size), 0) b FROM placement p
+               JOIN asset a ON a.hash = p.hash
+               WHERE p.replica = ? AND p.state = 'present'""", (name,)).fetchone()
+        count, size = held["n"], held["b"]
+    library_total = catalog.db.execute(
+        "SELECT COUNT(*) n FROM asset").fetchone()["n"]
+    row = {"n": count, "b": size}
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if abs(size) < 1024:
             break
@@ -267,8 +310,23 @@ def write_recovery_kit(cfg: Config, catalog: Catalog, name: str) -> bool:
     kit = drv.root
     try:
         kit.mkdir(parents=True, exist_ok=True)
+        # Only warn when this drive genuinely holds less than the whole
+        # library. A shard that happens to hold everything is complete, and
+        # claiming otherwise would be its own kind of lie.
+        if wanted is None or count >= library_total:
+            notice = ""
+            rebuild_cmd = f"rebuild {name}"
+        else:
+            siblings = "\n".join(
+                f"  - {r.name} ({r.mode})"
+                + ("   <- this drive" if r.name == name else "")
+                for r in cfg.replicas)
+            notice = SHARD_WARNING.format(count=count, total=library_total,
+                                          siblings=siblings)
+            rebuild_cmd = "rebuild --all"
         (kit / "RECOVERY.md").write_text(RECOVERY_DOC.format(
-            replica=name, count=row["n"], size=f"{size:.1f} {unit}",
+            shard_notice=notice, rebuild_cmd=rebuild_cmd,
+            count=row["n"], size=f"{size:.1f} {unit}",
             replicas=", ".join(r.name for r in cfg.replicas),
             when=datetime.now().strftime("%Y-%m-%d %H:%M"),
         ))
@@ -283,3 +341,90 @@ def write_recovery_kit(cfg: Config, catalog: Catalog, name: str) -> bool:
 def _config_source_path(cfg: Config) -> Path | None:
     from .config import DEFAULT_CONFIG_PATH
     return getattr(cfg, "source_path", None) or DEFAULT_CONFIG_PATH
+
+
+@dataclass
+class RebalanceStats:
+    replica: str = ""
+    removed: int = 0
+    bytes_freed: int = 0
+    kept_unsafe: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        return (f"{self.replica}: removed {self.removed} "
+                f"({self.bytes_freed / 1e9:.2f} GB freed), "
+                f"kept {self.kept_unsafe} that could not be safely removed")
+
+
+def rebalance(cfg: Config, catalog: Catalog, name: str, *, dry_run: bool = True,
+              progress=None) -> RebalanceStats:
+    """Remove files a shard no longer needs, once enough verified copies remain.
+
+    This is the only operation in PhotoVault that deletes a photo, so it is
+    deliberately the most paranoid one. Before removing any file it re-reads
+    `min_copies` other copies and confirms their bytes still hash correctly.
+    A placement row saying "present" is a belief; deleting the last good copy
+    because of a stale belief is exactly the failure this whole program exists
+    to prevent. It also defaults to a dry run.
+    """
+    from .hashing import hash_file
+    from .identity import verify as verify_identity
+
+    stats = RebalanceStats(replica=name)
+    spec = cfg.replica(name)
+    if not spec.is_shard:
+        raise ReplicaError(f"{name} is a full replica - it is meant to hold "
+                           f"everything, so there is nothing to rebalance")
+
+    drv = driver_for(spec)
+    if not drv.available():
+        raise ReplicaError(f"replica {name!r} is not available")
+    verify_identity(cfg, catalog, name, drv)
+
+    wanted = planned_for(cfg, catalog, name) or set()
+    held = catalog.db.execute(
+        """SELECT p.hash, a.rel_path, a.size FROM placement p
+           JOIN asset a ON a.hash = p.hash
+           WHERE p.replica = ? AND p.state = 'present'""", (name,)).fetchall()
+    surplus = [row for row in held if row["hash"] not in wanted]
+
+    others = {s.name: driver_for(s) for s in cfg.replicas if s.name != name}
+
+    for i, row in enumerate(surplus, 1):
+        h, rel, size = row["hash"], row["rel_path"], row["size"]
+        verified = 0
+        for other_name, other in others.items():
+            if verified >= cfg.min_copies:
+                break
+            try:
+                if not other.available() or other.hash_of(rel) != h:
+                    continue
+            except (OSError, ReplicaError):
+                continue
+            verified += 1
+
+        if verified < cfg.min_copies:
+            stats.kept_unsafe += 1
+            stats.notes.append(
+                f"kept {rel}: only {verified} verified cop"
+                f"{'y' if verified == 1 else 'ies'} elsewhere, need {cfg.min_copies}")
+            continue
+
+        if not dry_run:
+            try:
+                drv.delete(rel)
+            except (OSError, ReplicaError) as exc:
+                stats.notes.append(f"could not remove {rel}: {exc}")
+                continue
+            with catalog.tx():
+                catalog.db.execute(
+                    "DELETE FROM placement WHERE hash = ? AND replica = ?", (h, name))
+        stats.removed += 1
+        stats.bytes_freed += size
+        if progress and i % 25 == 0:
+            progress(stats, len(surplus))
+
+    if not dry_run:
+        catalog.log("rebalance", stats.summary())
+    return stats

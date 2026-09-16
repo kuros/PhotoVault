@@ -16,6 +16,12 @@ class ReplicaSpec:
     root: str
     host: str | None = None
     offline: bool = False  # a drive that normally lives unplugged in a drawer
+    mode: str = "full"     # full = a complete copy; shard = a computed subset
+    capacity: str = "auto"  # "1.8TB", "500GB", or "auto" to measure the disk
+
+    @property
+    def is_shard(self) -> bool:
+        return self.mode == "shard"
 
 
 @dataclass
@@ -34,6 +40,18 @@ class Config:
     replicas: list[ReplicaSpec] = field(default_factory=list)
     sources: list[SourceSpec] = field(default_factory=list)
     source_path: Path | None = None
+
+    @property
+    def shard_replicas(self) -> list[ReplicaSpec]:
+        return [r for r in self.replicas if r.is_shard]
+
+    @property
+    def full_replicas(self) -> list[ReplicaSpec]:
+        return [r for r in self.replicas if not r.is_shard]
+
+    @property
+    def sharded(self) -> bool:
+        return bool(self.shard_replicas)
 
     def replica(self, name: str) -> ReplicaSpec:
         for r in self.replicas:
@@ -60,6 +78,7 @@ def load(path: Path | None = None) -> Config:
         ReplicaSpec(
             name=r["name"], kind=r.get("kind", "local"), root=r["root"],
             host=r.get("host"), offline=bool(r.get("offline", False)),
+            mode=r.get("mode", "full"), capacity=str(r.get("capacity", "auto")),
         )
         for r in raw.get("replica", [])
     ]
@@ -78,6 +97,13 @@ def load(path: Path | None = None) -> Config:
     if "catalog" in vault:
         cfg.catalog_path = Path(vault["catalog"]).expanduser()
     cfg.replica(cfg.primary)  # fail fast if primary points at nothing
+    for r in cfg.replicas:
+        if r.mode not in ("full", "shard"):
+            raise ValueError(f"replica {r.name!r}: mode must be 'full' or 'shard'")
+    if cfg.replica(cfg.primary).is_shard:
+        raise ValueError(
+            f"the primary replica {cfg.primary!r} cannot be a shard - ingest "
+            f"needs somewhere to write every new photo before it is distributed")
     cfg.source_path = path    # so recovery kits can copy the real file
     return cfg
 
@@ -113,6 +139,18 @@ name = "win"
 kind = "rsync"
 host = "CHANGE_ME@192.168.1.50"     # needs an SSH server on the Windows laptop
 root = "/d/PhotoVault/library"
+
+# If one drive cannot hold the whole library, mark drives as shards and they
+# will each hold a computed subset instead. Capacity may be "auto" or a size
+# like "1.8TB". Run 'photovault plan' to preview the split before syncing.
+#
+# [[replica]]
+# name = "hdd2"
+# kind = "local"
+# root = "/Volumes/Backup2/PhotoVault/library"
+# offline = true
+# mode = "shard"
+# capacity = "auto"
 
 # Later, when you want offsite:
 # [[replica]]

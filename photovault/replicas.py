@@ -53,6 +53,11 @@ class Driver(ABC):
         """Copy a stored file out to a local path (used for repair)."""
 
     @abstractmethod
+    def delete(self, rel_path: str) -> None:
+        """Remove a stored file. Only ever called by rebalance, and only after
+        the caller has proved enough verified copies survive elsewhere."""
+
+    @abstractmethod
     def read_marker(self) -> str | None:
         """Raw contents of the identity marker, or None if unmarked."""
 
@@ -104,6 +109,14 @@ class LocalDriver(Driver):
     def get(self, rel_path: str, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.root / rel_path, dest)
+
+    def delete(self, rel_path: str) -> None:
+        (self.root / rel_path).unlink(missing_ok=True)
+        # Tidy the now-empty date folders so the tree stays browsable.
+        parent = (self.root / rel_path).parent
+        while parent != self.root and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
 
     def read_marker(self) -> str | None:
         try:
@@ -183,6 +196,11 @@ class RsyncDriver(Driver):
         if r.returncode != 0:
             raise ReplicaError(f"{self.name}: rsync pull failed: {r.stderr.strip()}")
 
+    def delete(self, rel_path: str) -> None:
+        target = self.root + "/" + rel_path
+        if self._ssh(f"rm -f {_q(target)}").returncode != 0:
+            raise ReplicaError(f"{self.name}: could not delete {rel_path}")
+
     def read_marker(self) -> str | None:
         r = self._ssh(f"cat {_q(self.root + '/' + MARKER_NAME)} 2>/dev/null", timeout=30)
         return r.stdout if r.returncode == 0 and r.stdout.strip() else None
@@ -214,6 +232,9 @@ class GCSDriver(Driver):
         raise NotImplementedError("GCS replica is not enabled yet")
 
     def get(self, rel_path: str, dest: Path) -> None:
+        raise NotImplementedError("GCS replica is not enabled yet")
+
+    def delete(self, rel_path: str) -> None:
         raise NotImplementedError("GCS replica is not enabled yet")
 
     def read_marker(self) -> str | None:
