@@ -8,12 +8,13 @@ tool that quietly stops backing up is worse than no backup tool at all.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from photovault import health, ingest, sync, verify
+from photovault import health, identity, ingest, sync, verify
 from photovault.catalog import Catalog
 from photovault.config import Config, ReplicaSpec, SourceSpec
 
@@ -345,3 +346,104 @@ class TestSafetyGuards(VaultTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestMultipleDrives(VaultTestCase):
+    """With one external drive a path is an adequate name for it. With two it
+    is not: macOS hands /Volumes/<Name> out first-come, so a second drive of
+    the same name lands on the first one's path whenever that one is absent."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg.replicas.append(
+            ReplicaSpec("hdd2", "local", str(self.tmp / "hdd2"), offline=True))
+        self.cat.upsert_replica("hdd2", "local", str(self.tmp / "hdd2"),
+                                is_offline=True)
+
+    def sync_all(self):
+        for name in ("hdd", "hdd2", "win"):
+            sync.push(self.cfg, self.cat, name)
+
+    def test_four_replicas_all_reach_full_redundancy(self):
+        self.ingest_all()
+        self.sync_all()
+        h = health.assess(self.cfg, self.cat)
+        self.assertEqual(h.underprotected, 0)
+        self.assertTrue(h.ok)
+        for name in ("mac", "hdd", "hdd2", "win"):
+            self.assertEqual(h.per_replica[name]["present"], 13)
+
+    def test_each_drive_is_stamped_with_its_own_identity(self):
+        from photovault.replicas import MARKER_NAME
+        self.ingest_all()
+        self.sync_all()
+        ids = {}
+        for name in ("hdd", "hdd2", "win"):
+            marker = json.loads((self.tmp / name / MARKER_NAME).read_text())
+            self.assertEqual(marker["replica"], name)
+            ids[name] = marker["uuid"]
+        self.assertEqual(len(set(ids.values())), 3, "uuids must be distinct")
+
+    def test_swapped_drive_is_refused_not_silently_accepted(self):
+        self.ingest_all()
+        self.sync_all()
+        before = sorted(p.name for p in (self.tmp / "hdd2").rglob("*.jpg"))
+
+        # hdd goes in a drawer; hdd2 is plugged in and takes hdd's path.
+        shutil.rmtree(self.tmp / "hdd")
+        (self.tmp / "hdd2").rename(self.tmp / "hdd")
+
+        with self.assertRaises(identity.IdentityMismatch):
+            sync.reconcile(self.cfg, self.cat, "hdd")
+        with self.assertRaises(identity.IdentityMismatch):
+            sync.push(self.cfg, self.cat, "hdd")
+
+        after = sorted(p.name for p in (self.tmp / "hdd").rglob("*.jpg"))
+        self.assertEqual(before, after, "the wrong drive must not be written to")
+
+    def test_absent_drive_is_not_conjured_into_existence(self):
+        """An unplugged drive leaves no directory. Claiming that path would
+        create it on the internal disk and 'restore' the library into it."""
+        self.ingest_all()
+        self.sync_all()
+        shutil.rmtree(self.tmp / "hdd2")
+
+        with self.assertRaises(identity.IdentityMismatch):
+            sync.push(self.cfg, self.cat, "hdd2")
+        self.assertFalse((self.tmp / "hdd2").exists(),
+                         "no directory may be created for an absent drive")
+
+    def test_scrub_skips_a_misidentified_drive_loudly(self):
+        self.ingest_all()
+        self.sync_all()
+        shutil.rmtree(self.tmp / "hdd")
+        (self.tmp / "hdd2").rename(self.tmp / "hdd")
+
+        st = verify.scrub(self.cfg, self.cat, force=True)
+        self.assertTrue(any("SKIPPED hdd" in p for p in st.problems))
+        self.assertEqual(st.corrupt, 0)
+
+    def test_adopt_re_registers_a_genuinely_replaced_drive(self):
+        self.ingest_all()
+        self.sync_all()
+        old_uuid = self.cat.replica("hdd2")["uuid"]
+
+        # The drive died and was replaced with a blank one.
+        shutil.rmtree(self.tmp / "hdd2")
+        (self.tmp / "hdd2").mkdir()
+        with self.assertRaises(identity.IdentityMismatch):
+            sync.push(self.cfg, self.cat, "hdd2")
+
+        new_uuid = identity.adopt(self.cfg, self.cat, "hdd2")
+        self.assertNotEqual(new_uuid, old_uuid)
+        sync.reconcile(self.cfg, self.cat, "hdd2")
+        st = sync.push(self.cfg, self.cat, "hdd2")
+        self.assertEqual(st.copied, 13)
+        self.assertTrue(health.assess(self.cfg, self.cat).ok)
+
+    def test_staleness_tracks_which_drive_to_plug_in_next(self):
+        self.ingest_all()
+        sync.push(self.cfg, self.cat, "hdd")
+        _, days = identity.staleness(self.cat, "hdd")
+        self.assertEqual(days, 0)
+        self.assertEqual(identity.staleness(self.cat, "hdd2"), (None, None))

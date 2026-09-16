@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS replica (
     host       TEXT,
     is_offline INTEGER NOT NULL DEFAULT 0,
     enabled    INTEGER NOT NULL DEFAULT 1,
-    added_at   TEXT NOT NULL
+    added_at   TEXT NOT NULL,
+    uuid           TEXT,
+    last_synced_at TEXT
 );
 
 -- What each replica is believed to hold. 'present' is a claim; verified_at
@@ -90,10 +92,26 @@ class Catalog:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
         self.db.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
+        self.db.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a catalog was first created.
+
+        CREATE TABLE IF NOT EXISTS silently does nothing for an existing table,
+        so new columns must be added explicitly or an upgraded PhotoVault would
+        fail against an older catalog.
+        """
+        have = {r["name"] for r in
+                self.db.execute("PRAGMA table_info(replica)").fetchall()}
+        for column, ddl in (("uuid", "TEXT"), ("last_synced_at", "TEXT")):
+            if column not in have:
+                self.db.execute(f"ALTER TABLE replica ADD COLUMN {column} {ddl}")
         self.db.commit()
 
     def close(self) -> None:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __version__, config, health, ingest, sync, verify
 from .catalog import Catalog
+from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
 
 GREEN, RED, YELLOW, DIM, BOLD, RESET = (
@@ -20,6 +21,12 @@ def human(n: float) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} PB"
+
+
+def pad(text: str, width: int, colour: str = "") -> str:
+    """Left-align to a visible width. Colour codes are zero-width on screen but
+    count toward str.format's width, so padding must be computed before them."""
+    return f"{colour}{text}{RESET if colour else ''}" + " " * max(0, width - len(text))
 
 
 def _load(args) -> tuple[config.Config, Catalog]:
@@ -53,19 +60,65 @@ def cmd_init(args) -> int:
 
 def cmd_replicas(args) -> int:
     cfg, cat = _load(args)
-    print(f"{BOLD}{'replica':<12}{'kind':<8}{'offline':<9}{'status':<14}root{RESET}")
+    print(f"{BOLD}{'replica':<12}{'kind':<8}{'offline':<9}{'status':<14}"
+          f"{'last synced':<14}root{RESET}")
+    stale_offline = []
     for name, drv, ok in sync.available_replicas(cfg):
         spec = cfg.replica(name)
         if ok:
-            status = f"{GREEN}reachable{RESET}"
+            status = pad("reachable", 14, GREEN)
         elif spec.offline:
-            status = f"{DIM}unplugged{RESET}"
+            status = pad("unplugged", 14, DIM)
         else:
-            status = f"{RED}UNREACHABLE{RESET}"
+            status = pad("UNREACHABLE", 14, RED)
+
+        last, days = staleness(cat, name)
+        if days is None:
+            age = pad("never", 14, DIM)
+        elif days == 0:
+            age = pad("today", 14)
+        elif spec.offline and days >= 30:
+            age = pad(f"{days}d ago", 14, YELLOW)
+            stale_offline.append((name, days))
+        else:
+            age = pad(f"{days}d ago", 14)
+
         star = "*" if name == cfg.primary else " "
         print(f"{star}{name:<11}{spec.kind:<8}{'yes' if spec.offline else 'no':<9}"
-              f"{status:<23}{spec.root}")
+              f"{status}{age}{spec.root}")
+
     print(f"\n{DIM}* = primary library (ingest writes here){RESET}")
+    if stale_offline:
+        worst = max(stale_offline, key=lambda x: x[1])
+        print(f"{YELLOW}Plug in '{worst[0]}' next - it is {worst[1]} days "
+              f"behind.{RESET}")
+    cat.close()
+    return 0
+
+
+def cmd_adopt(args) -> int:
+    """Re-register the storage at a replica's path as that replica."""
+    cfg, cat = _load(args)
+    spec = next((r for r in cfg.replicas if r.name == args.replica), None)
+    if spec is None:
+        print(f"{RED}no replica named {args.replica!r} in your config{RESET}")
+        return 1
+    print(f"This will stamp {BOLD}{spec.root}{RESET} as replica "
+          f"{BOLD}{args.replica}{RESET}.")
+    if not args.yes:
+        reply = input("Only do this if you deliberately replaced the drive. "
+                      "Continue? [y/N] ")
+        if reply.strip().lower() not in ("y", "yes"):
+            print("cancelled")
+            return 1
+    try:
+        uid = adopt(cfg, cat, args.replica)
+    except ReplicaError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return 1
+    print(f"{GREEN}Registered.{RESET} New identity {uid[:8]}.")
+    print(f"{DIM}Run 'photovault reconcile {args.replica}' to learn what it "
+          f"holds, then 'photovault sync {args.replica}'.{RESET}")
     cat.close()
     return 0
 
@@ -151,6 +204,11 @@ def cmd_sync(args) -> int:
             st = sync.push(cfg, cat, name, limit=args.limit, dry_run=args.dry_run,
                            progress=lambda s, total: print(
                                f"  ...{s.copied}/{total} copied", end="\r", flush=True))
+        except IdentityMismatch as exc:
+            print(f"  {RED}WRONG DRIVE - nothing was written{RESET}")
+            print(f"  {RED}{exc}{RESET}")
+            rc = 1
+            continue
         except (ReplicaError, KeyError) as exc:
             spec = next((r for r in cfg.replicas if r.name == name), None)
             tone = YELLOW if spec and spec.offline else RED
@@ -175,6 +233,9 @@ def cmd_reconcile(args) -> int:
         try:
             changed = sync.reconcile(cfg, cat, name)
             print(f"{name}: {changed} placement corrections")
+        except IdentityMismatch as exc:
+            print(f"{name}: {RED}WRONG DRIVE - {exc}{RESET}")
+            rc = 1
         except (ReplicaError, KeyError) as exc:
             print(f"{name}: {YELLOW}{exc}{RESET}")
             rc = 1
@@ -398,6 +459,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "exposes your library to the network with no password.")
     s.add_argument("--no-browser", action="store_true")
     s.set_defaults(func=cmd_ui)
+
+    s = sub.add_parser("adopt",
+                       help="re-register a replaced drive under a replica name")
+    s.add_argument("replica")
+    s.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+    s.set_defaults(func=cmd_adopt)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

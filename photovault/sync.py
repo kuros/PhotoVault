@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .catalog import Catalog
 from .config import Config
+from .identity import mark_synced, verify as verify_identity
 from .mediatime import normalize_ext
 from .replicas import Driver, LocalDriver, ReplicaError, driver_for
 
@@ -38,6 +39,7 @@ def reconcile(cfg: Config, catalog: Catalog, name: str) -> int:
     drv = driver_for(spec)
     if not drv.available():
         raise ReplicaError(f"replica {name!r} is not available")
+    verify_identity(cfg, catalog, name, drv)
 
     present = drv.list_present()
     changed = 0
@@ -66,6 +68,9 @@ def push(cfg: Config, catalog: Catalog, name: str, *, limit: int | None = None,
     drv = driver_for(spec)
     if not drv.available():
         raise ReplicaError(f"replica {name!r} is not available")
+    # Identity first: ensure_root() would otherwise create the directory for a
+    # drive that is not plugged in, before anything got a chance to object.
+    verify_identity(cfg, catalog, name, drv)
     if isinstance(drv, LocalDriver) and not dry_run:
         drv.ensure_root()
 
@@ -99,6 +104,7 @@ def push(cfg: Config, catalog: Catalog, name: str, *, limit: int | None = None,
 
     if not dry_run:
         write_recovery_kit(cfg, catalog, name)
+        mark_synced(catalog, name)
         catalog.log("push", stats.summary())
     return stats
 
@@ -154,6 +160,7 @@ def rebuild_from(cfg: Config, catalog: Catalog, name: str, *, progress=None) -> 
     drv = LocalDriver(spec)
     if not drv.available():
         raise ReplicaError(f"replica {name!r} is not available")
+    verify_identity(cfg, catalog, name, drv)
 
     root = drv.root
     found = 0

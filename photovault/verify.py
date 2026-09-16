@@ -59,12 +59,20 @@ def due_for_scrub(catalog: Catalog, cfg: Config, limit: int | None = None,
 def scrub(cfg: Config, catalog: Catalog, *, limit: int | None = None,
           repair: bool = True, force: bool = False, progress=None) -> ScrubStats:
     stats = ScrubStats()
+    from .identity import IdentityMismatch, verify as verify_identity
+
     drivers = {}
     for spec in cfg.replicas:
         drv = driver_for(spec)
         try:
-            if drv.available():
-                drivers[spec.name] = drv
+            if not drv.available():
+                continue
+            # A mis-identified drive must be skipped loudly, never scrubbed:
+            # verifying the wrong disk would produce confident nonsense.
+            verify_identity(cfg, catalog, spec.name, drv)
+            drivers[spec.name] = drv
+        except IdentityMismatch as exc:
+            stats.problems.append(f"SKIPPED {spec.name}: {exc}")
         except Exception:
             continue
 

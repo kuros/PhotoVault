@@ -19,6 +19,9 @@ from .hashing import ALGO, hash_file
 # Remote hashing must agree with whatever we use locally.
 _REMOTE_HASH_CMD = {"sha256": "sha256sum", "blake3": "b3sum"}
 
+# Written into every replica root so a drive can prove which replica it is.
+MARKER_NAME = ".photovault-id"
+
 
 class ReplicaError(RuntimeError):
     pass
@@ -48,6 +51,14 @@ class Driver(ABC):
     @abstractmethod
     def get(self, rel_path: str, dest: Path) -> None:
         """Copy a stored file out to a local path (used for repair)."""
+
+    @abstractmethod
+    def read_marker(self) -> str | None:
+        """Raw contents of the identity marker, or None if unmarked."""
+
+    @abstractmethod
+    def write_marker(self, payload: str) -> None:
+        """Stamp this storage with an identity marker."""
 
 
 class LocalDriver(Driver):
@@ -93,6 +104,16 @@ class LocalDriver(Driver):
     def get(self, rel_path: str, dest: Path) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(self.root / rel_path, dest)
+
+    def read_marker(self) -> str | None:
+        try:
+            return (self.root / MARKER_NAME).read_text()
+        except OSError:
+            return None
+
+    def write_marker(self, payload: str) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / MARKER_NAME).write_text(payload)
 
 
 class RsyncDriver(Driver):
@@ -162,6 +183,18 @@ class RsyncDriver(Driver):
         if r.returncode != 0:
             raise ReplicaError(f"{self.name}: rsync pull failed: {r.stderr.strip()}")
 
+    def read_marker(self) -> str | None:
+        r = self._ssh(f"cat {_q(self.root + '/' + MARKER_NAME)} 2>/dev/null", timeout=30)
+        return r.stdout if r.returncode == 0 and r.stdout.strip() else None
+
+    def write_marker(self, payload: str) -> None:
+        import base64
+        blob = base64.b64encode(payload.encode()).decode()
+        cmd = (f"mkdir -p {_q(self.root)} && echo {_q(blob)} | "
+               f"base64 -d > {_q(self.root + '/' + MARKER_NAME)}")
+        if self._ssh(cmd).returncode != 0:
+            raise ReplicaError(f"{self.name}: could not write identity marker")
+
 
 class GCSDriver(Driver):
     """Offsite copy in Google Cloud Storage. Not wired up yet - the interface
@@ -181,6 +214,12 @@ class GCSDriver(Driver):
         raise NotImplementedError("GCS replica is not enabled yet")
 
     def get(self, rel_path: str, dest: Path) -> None:
+        raise NotImplementedError("GCS replica is not enabled yet")
+
+    def read_marker(self) -> str | None:
+        return None
+
+    def write_marker(self, payload: str) -> None:
         raise NotImplementedError("GCS replica is not enabled yet")
 
 

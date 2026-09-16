@@ -61,6 +61,7 @@ python3 -m photovault status      # am I actually protected?
 | `rebuild <replica>` | Recover a lost catalog by re-reading a device |
 | `restore <folder>` | Rebuild a complete library into a fresh folder |
 | `replicas` | Which devices are configured and reachable right now |
+| `adopt <replica>` | Re-register a genuinely replaced drive |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -111,6 +112,87 @@ go stale, because different bytes mean a different key.
 It uses whichever tool it finds: **Pillow** (`pip install Pillow`, fastest and works
 everywhere), **sips** (built into macOS, used automatically), or **ffmpeg** for video
 poster frames. Files it can't thumbnail show their file type instead of a broken image.
+
+---
+
+## Using more than one external drive
+
+Replicas are just a list — add as many as you like:
+
+```toml
+[[replica]]
+name = "hdd1"
+kind = "local"
+root = "/Volumes/Backup1/PhotoVault/library"
+offline = true
+
+[[replica]]
+name = "hdd2"
+kind = "local"
+root = "/Volumes/Backup2/PhotoVault/library"
+offline = true
+```
+
+Two good reasons to:
+
+- **More copies.** Four devices means four independent failures before you lose
+  anything. Raise `min_copies` to match, or leave it at 3 and treat the fourth as
+  slack.
+- **Offsite rotation.** Keep one drive at a relative's house and swap them every few
+  months. This is the single biggest upgrade to a home backup, because it survives
+  fire, flood and theft — the failures that destroy every copy in one building at once.
+
+### Drives are identified by a marker, not by their path
+
+This matters more than it sounds. macOS assigns `/Volumes/<Name>` first-come: if two
+drives are both called `Backup`, the second one mounts as `/Volumes/Backup 1` — **or as
+`/Volumes/Backup`, if the first isn't plugged in.**
+
+So with path-based identification, plugging in the wrong drive means PhotoVault reads
+drive 2, records the contents against drive 1's name, and starts "repairing" the wrong
+disk. All four health checks stay green. You'd only find out when you needed the backup.
+
+PhotoVault therefore writes a `.photovault-id` file into each replica root containing a
+random UUID, and checks it before **every** read or write:
+
+```
+$ photovault sync hdd1
+hdd1
+  WRONG DRIVE - nothing was written
+  hdd1: this storage is stamped as replica 'hdd2', not 'hdd1'. Refusing to touch it.
+```
+
+It also refuses to act on a path with no marker once a drive has been registered,
+because an unplugged drive leaves either nothing or an empty mount point — and claiming
+that would quietly rebuild your whole library onto the internal SSD.
+
+If you genuinely replace a dead drive, say so explicitly:
+
+```bash
+photovault adopt hdd2
+photovault reconcile hdd2 && photovault sync hdd2
+```
+
+### Knowing which drive to plug in next
+
+`photovault replicas` tracks when each one was last synced, and nags about offline
+drives more than 30 days behind:
+
+```
+ replica     kind    offline  status        last synced   root
+*mac         local   no       reachable     never         ~/PhotoVault/library
+ hdd1        local   yes      unplugged     3d ago        /Volumes/Backup1/...
+ hdd2        local   yes      unplugged     47d ago       /Volumes/Backup2/...
+
+Plug in 'hdd2' next - it is 47 days behind.
+```
+
+### What this does *not* do
+
+Every replica holds a **complete** copy. If your library outgrows a single drive,
+PhotoVault will not split it across two — that's a different design (sharding), and it
+trades away the property that any one drive is independently complete and readable
+without the others. Ask if you need it.
 
 ---
 
@@ -287,9 +369,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-35 tests covering ingest, deduplication, replication, corruption repair, catalog
+46 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence.
+path-traversal defence, and multi-drive identity safety.
 
 ---
 

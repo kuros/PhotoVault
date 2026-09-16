@@ -298,3 +298,49 @@ Worth recording, because all three are invisible until you look at the rendered 
 
 > **The general lesson:** code that produces a visual result cannot be verified by
 > reading it. Run it and look.
+
+
+---
+
+## Decision 8: storage proves its own identity
+
+With a single external drive, the filesystem path is a perfectly good name for it. Add a
+second and that stops being true — and it stops being true *silently*, which is the
+dangerous kind.
+
+macOS hands out `/Volumes/<Name>` on a first-come basis. Two drives both named `Backup`:
+whichever mounts first gets `/Volumes/Backup`, and the other gets `/Volumes/Backup 1`.
+Plug in only the second one, and it takes the first one's path.
+
+I demonstrated the consequence before fixing it, which is worth doing whenever you think
+you have found a bug — a bug you cannot reproduce is a theory. PhotoVault read drive 2,
+recorded its contents as drive 1's, decided drive 1 had "lost" six photos, and wrote
+them onto drive 2. Then printed four green checks.
+
+The fix is to stop trusting the path. Every replica root carries `.photovault-id` with a
+random UUID, and the catalog remembers which UUID belongs to which replica. Every read
+or write checks it first.
+
+> **The general lesson:** an identifier controlled by the environment (a path, a mount
+> point, a hostname, a port) is not an identity. When something must be *itself* across
+> disconnections and reboots, give it an identifier it carries with it. This is the same
+> instinct as [Decision 1](#decision-1-content-addressing) — identify things by
+> something intrinsic — applied one level up, to devices rather than files.
+
+### Two fixes the drill forced that the first implementation missed
+
+Writing the check was the easy part. Running the scenario found two holes in it:
+
+1. **Auto-claiming unmarked storage was too eager.** An unplugged drive leaves either
+   nothing or an empty mount point. The first version happily stamped that as the
+   replica and "restored" the library into it — recreating the exact boot-disk-fill
+   failure the mount guard already defends against, through a new door. Claiming is now
+   allowed only on genuine first use, when no UUID is yet on record.
+
+2. **`ensure_root()` ran before the identity check**, so the directory for an absent
+   drive was created before anything could object. Ordering is part of the guarantee,
+   not an implementation detail: a check that runs after the side effect is not a check.
+
+> **The general lesson:** a safety check has to be tested against the situation it
+> guards, not just reviewed for plausibility. Both holes were invisible when reading
+> the code and obvious within seconds of running the scenario.
