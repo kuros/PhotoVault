@@ -67,6 +67,8 @@ python3 -m photovault status      # am I actually protected?
 | `rebalance` | Reclaim space on a shard after the drives changed |
 | `watch` | Auto-import and back up as photos land in the inbox |
 | `install-agent` | Run the watcher from login (macOS) |
+| `import <device>` | Pull from a device, archive it, verify |
+| `reclaim <device>` | What's provably safe to delete? |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -285,6 +287,95 @@ python3 -m photovault reconcile --all
 
 Each sharded drive's `RECOVERY.md` says so in capitals, lists its sibling drives, and
 tells whoever finds it not to mistake it for a full backup.
+
+---
+
+## Configuring from the UI
+
+Everything below can be set in the browser instead of editing TOML:
+
+```bash
+python3 -m photovault ui     # → Settings tab
+```
+
+You get the vault rules (primary device, copies, offline requirement, scrub
+interval), the device list, and the source list — with detected drives offered as
+one-click chips so you don't type mount paths by hand.
+
+Saving is safe by construction: the UI's config is rendered to TOML and **loaded back
+through the same parser the CLI uses** before anything is written. A config the CLI
+would reject can't be produced from the browser. The previous file is kept as
+`config.toml.bak`, the write is atomic, and the change applies to the running server
+with no restart.
+
+Two deliberate refusals: saving is blocked while a job is running (swapping the config
+mid-operation would have that job finish against replicas that no longer exist), and an
+invalid config leaves the existing file untouched rather than half-written.
+
+---
+
+## Immich
+
+If you want a proper mobile app — background upload on both iOS and Android, browsing,
+search, and a "free up space" that clears the phone — run [Immich](https://immich.app)
+alongside PhotoVault. See [immich/README.md](immich/README.md) for a pinned
+`docker-compose.yml` and the setup.
+
+The division of labour:
+
+| | Immich | PhotoVault |
+|---|---|---|
+| Mobile upload, browse, search | ✅ | ✗ |
+| Multi-drive replication | ✗ | ✅ |
+| Bitrot detection and repair | ✗ | ✅ |
+| Rebuildable catalog, drive identity | ✗ | ✅ |
+
+Add Immich's originals folder as a source and PhotoVault archives everything it
+ingests. **Leave `clear_after_import` off** — Immich owns those files and deleting them
+behind its back corrupts its database.
+
+---
+
+## Freeing up phone storage safely
+
+The hard part of "clear space on my phone" isn't copying files — it's knowing when it's
+safe to delete. Once you delete from the phone, PhotoVault's copies are the only copies.
+
+```bash
+python3 -m photovault import android --reclaim
+```
+
+```
+android (adb)
+  pulling from Android (/sdcard/DCIM)...
+  imported 412, 39 already known
+  hdd1: copied 412
+  hdd2: unavailable (not connected)
+  win: copied 412
+
+  389 files (4.9 GB) have 3 verified copies - safe to delete
+  23 held back
+    IMG_8821.jpg: 2 verified copies, need 3 (not connected: hdd2)
+```
+
+`reclaim` counts only copies it has **re-read and re-hashed right now**. A catalog row
+saying `present` is a belief, and a belief isn't sufficient evidence for deleting
+someone's only remaining file. Drives that weren't plugged in don't count — so you can
+only free as much phone storage as you actually earned, which is what makes the ritual
+*plug in both drives first*.
+
+Use `photovault reclaim <device>` on its own to ask the question without importing.
+
+### Android vs iOS
+
+| | Path | Deletion |
+|---|---|---|
+| **Android** | `adb pull` — set `kind = "adb"` on the source | Automated, via `adb shell rm` |
+| **iOS** | Image Capture or Immich → a folder | Manual, or through Immich's free-up-space |
+
+`brew install android-platform-tools` for the Android path. iOS can't be automated
+without macFUSE (a kernel extension needing reduced security on Apple Silicon), which
+isn't worth it for a monthly task.
 
 ---
 
@@ -534,9 +625,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-65 tests covering ingest, deduplication, replication, corruption repair, catalog
+81 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, and inbox watching.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, and reclaim safety.
 
 ---
 

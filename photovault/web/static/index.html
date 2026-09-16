@@ -23,6 +23,7 @@
     <button class="tab is-active" data-view="photos" role="tab">Photos</button>
     <button class="tab" data-view="health" role="tab">Health</button>
     <button class="tab" data-view="activity" role="tab">Activity</button>
+    <button class="tab" data-view="settings" role="tab">Settings</button>
   </nav>
 
   <div class="actions">
@@ -105,6 +106,68 @@
       <div class="panel panel--card">
         <h3 class="panel__title">History</h3>
         <ul id="eventList" class="events"></ul>
+      </div>
+    </div>
+
+    <!-- SETTINGS -->
+    <div class="view" data-view="settings">
+      <div class="viewbar">
+        <h2>Settings</h2>
+        <div class="viewbar__right">
+          <span id="settingsPath" class="muted"></span>
+          <button id="settingsReload" class="btn btn--sm">Reload</button>
+          <button id="settingsSave" class="btn btn--sm btn--primary">Save</button>
+        </div>
+      </div>
+      <div id="settingsBanner" class="banner" hidden></div>
+
+      <div class="panel panel--card">
+        <h3 class="panel__title">Vault</h3>
+        <p class="muted panel__sub">The safety rule everything else enforces.</p>
+        <div class="fields">
+          <label>Primary device
+            <select id="cfgPrimary"></select>
+            <small>Where new photos are written before being distributed.</small>
+          </label>
+          <label>Copies of every photo
+            <input id="cfgMinCopies" type="number" min="1" max="8">
+            <small>Across independent devices.</small>
+          </label>
+          <label>Re-verify every
+            <input id="cfgScrubDays" type="number" min="1" max="365">
+            <small>Days between integrity checks of stored files.</small>
+          </label>
+          <label class="field-check">
+            <input id="cfgOffline" type="checkbox">
+            <span>Require at least one offline copy
+              <small>A drive normally unplugged survives ransomware and a bad delete.</small>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel panel--card">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">Devices</h3>
+            <p class="muted panel__sub">Where copies of your library live.</p>
+          </div>
+          <button class="btn btn--sm" data-add="replica">Add device</button>
+        </div>
+        <div id="detectedDrives" class="drives"></div>
+        <div id="replicaRows" class="rows"></div>
+      </div>
+
+      <div class="panel panel--card">
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">Sources</h3>
+            <p class="muted panel__sub">Folders photos are imported from.
+              Read-only unless you tick "clear after import".</p>
+          </div>
+          <button class="btn btn--sm" data-add="source">Add source</button>
+        </div>
+        <div id="sourceRows" class="rows"></div>
       </div>
     </div>
 

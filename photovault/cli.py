@@ -6,7 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, config, health, ingest, placement, sync, verify
+from . import (__version__, config, health, importer, ingest, placement,
+               sync, verify)
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -419,7 +420,9 @@ def cmd_ui(args) -> int:
     from .web.server import serve
     cfg, cat = _load(args)
     cat.close()  # the server opens its own per-thread connections
-    serve(cfg, host=args.host, port=args.port, open_browser=not args.no_browser)
+    serve(cfg, host=args.host, port=args.port, open_browser=not args.no_browser,
+          config_path=Path(args.config).expanduser() if args.config
+          else config.DEFAULT_CONFIG_PATH)
     return 0
 
 
@@ -600,6 +603,86 @@ def _uid() -> int:
     return os.getuid()
 
 
+def _source_by_device(cfg, device: str | None):
+    if device:
+        matches = [s for s in cfg.sources if s.device == device]
+        if not matches:
+            names = ", ".join(s.device for s in cfg.sources) or "none configured"
+            raise KeyError(f"no source named {device!r} (have: {names})")
+        return matches
+    return cfg.sources
+
+
+def cmd_import(args) -> int:
+    """Pull from a device, archive it everywhere reachable, then verify."""
+    cfg, cat = _load(args)
+    try:
+        sources = _source_by_device(cfg, args.device)
+    except KeyError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return 1
+    if not sources:
+        print("No sources configured. Run 'photovault setup'.")
+        return 1
+
+    rc = 0
+    for spec in sources:
+        print(f"\n{BOLD}{spec.device}{RESET} {DIM}({spec.kind}){RESET}")
+        rep = importer.run_import(cfg, cat, spec, reclaim=args.reclaim)
+        for err in rep.errors[:10]:
+            print(f"  {RED}{err}{RESET}")
+            rc = 1
+        if rep.reclaim:
+            _print_reclaim(cfg, rep.reclaim, applied=args.reclaim)
+    cat.close()
+    return rc
+
+
+def cmd_reclaim(args) -> int:
+    """Report which files are provably safe to delete, and optionally delete."""
+    cfg, cat = _load(args)
+    try:
+        sources = _source_by_device(cfg, args.device)
+    except KeyError as exc:
+        print(f"{RED}{exc}{RESET}")
+        return 1
+
+    for spec in sources:
+        if spec.kind == "adb":
+            print(f"{DIM}{spec.device}: run 'photovault import {spec.device} "
+                  f"--reclaim' for Android devices{RESET}")
+            continue
+        root = Path(spec.path).expanduser()
+        if not root.is_dir():
+            continue
+        print(f"\n{BOLD}{spec.device}{RESET}  {root}")
+        rep = importer.reclaimable(cfg, cat, root, device=spec.device,
+                                   apply=args.apply)
+        _print_reclaim(cfg, rep, applied=args.apply)
+    cat.close()
+    return 0
+
+
+def _print_reclaim(cfg, rep, *, applied: bool) -> None:
+    if not rep.checked:
+        return
+    if rep.unreachable:
+        print(f"  {YELLOW}not connected: {', '.join(rep.unreachable)}{RESET}"
+              f"{DIM} - photos needing those drives are held back{RESET}")
+    if applied:
+        print(f"  {GREEN}deleted {rep.deleted:,} files, freed "
+              f"{human(rep.bytes_freed)}{RESET}")
+    elif rep.safe:
+        print(f"  {GREEN}{len(rep.safe):,} files ({human(rep.reclaimable_bytes)}) "
+              f"have {cfg.min_copies} verified copies - safe to delete{RESET}")
+    if rep.held:
+        print(f"  {YELLOW}{len(rep.held):,} held back{RESET}")
+        for path, _, why in rep.held[:5]:
+            print(f"    {DIM}{path.name}: {why}{RESET}")
+    if rep.safe and not applied:
+        print(f"{DIM}  Re-run with --apply (or --reclaim) to delete them.{RESET}")
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -711,6 +794,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interval", type=float, default=20.0)
     s.add_argument("--uninstall", action="store_true")
     s.set_defaults(func=cmd_install_agent)
+
+    s = sub.add_parser("import",
+                       help="pull from a device, archive it, and verify")
+    s.add_argument("device", nargs="?", help="source device name")
+    s.add_argument("--reclaim", action="store_true",
+                   help="delete files that reach min_copies verified copies")
+    s.set_defaults(func=cmd_import)
+
+    s = sub.add_parser("reclaim",
+                       help="which files are safe to delete from a device?")
+    s.add_argument("device", nargs="?")
+    s.add_argument("--apply", action="store_true", help="actually delete")
+    s.set_defaults(func=cmd_reclaim)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

@@ -17,7 +17,8 @@ const state = {
   busy: false,
 };
 
-const PAGE_TITLES = { photos: 'Photos', health: 'Health', activity: 'Activity' };
+const PAGE_TITLES = { photos: 'Photos', health: 'Health',
+                      activity: 'Activity', settings: 'Settings' };
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -179,6 +180,177 @@ async function renderPlan() {
         ${pct === null ? '—' : pct.toFixed(0) + '%'}</span>
     </div>`;
   }).join('');
+}
+
+
+/* ---------------------------------------------------------------- settings */
+
+let draft = null;          // the config being edited, saved only on Save
+let drives = [];
+
+async function loadSettings() {
+  const [cfg, d] = await Promise.all([
+    api('config'),
+    api('drives').catch(() => ({ drives: [] })),
+  ]);
+  draft = cfg.config;
+  drives = d.drives || [];
+  $('#settingsPath').textContent = cfg.path;
+  renderSettings();
+}
+
+function banner(text, kind) {
+  const el = $('#settingsBanner');
+  el.hidden = !text;
+  el.className = `banner banner--${kind}`;
+  el.textContent = text;
+}
+
+function renderSettings() {
+  if (!draft) return;
+  const v = draft.vault || {};
+
+  $('#cfgPrimary').innerHTML = (draft.replica || [])
+    .map((r) => `<option value="${r.name}"${r.name === v.primary ? ' selected' : ''}>${r.name}</option>`)
+    .join('') || '<option value="">no devices yet</option>';
+  $('#cfgMinCopies').value = v.min_copies ?? 3;
+  $('#cfgScrubDays').value = v.scrub_days ?? 30;
+  $('#cfgOffline').checked = v.require_offline_copy !== false;
+
+  $('#detectedDrives').innerHTML = drives.length
+    ? `<span class="muted" style="font-size:12.5px;align-self:center">Detected:</span>`
+      + drives.map((dr, i) => `<button class="drive-chip" data-drive="${i}">
+          ${dr.label} <small>${bytes(dr.free)} free</small></button>`).join('')
+    : '';
+
+  $('#replicaRows').innerHTML = (draft.replica || []).map((r, i) => `
+    <div class="row" data-kind="replica" data-i="${i}">
+      <input type="text" value="${r.name ?? ''}" data-field="name" placeholder="name">
+      <select data-field="kind">
+        ${['local', 'rsync', 'gcs'].map((k) =>
+          `<option value="${k}"${r.kind === k ? ' selected' : ''}>${k}</option>`).join('')}
+      </select>
+      <input type="text" value="${r.root ?? ''}" data-field="root"
+             placeholder="${r.kind === 'rsync' ? '/d/PhotoVault/library' : '/Volumes/Drive/PhotoVault/library'}">
+      <span class="row__flags">
+        <label><input type="checkbox" data-field="offline"${r.offline ? ' checked' : ''}>offline</label>
+        <label><input type="checkbox" data-field="shard"${r.mode === 'shard' ? ' checked' : ''}>shard</label>
+      </span>
+      <button class="row__del" data-del="replica" data-i="${i}" title="Remove">&times;</button>
+    </div>
+    ${r.kind === 'rsync' ? `<div class="row" data-kind="replica" data-i="${i}"
+        style="grid-template-columns:1fr">
+      <input type="text" value="${r.host ?? ''}" data-field="host"
+             placeholder="SSH host, e.g. you@192.168.1.50"></div>` : ''}`).join('')
+    || '<p class="muted">No devices yet. Add one above.</p>';
+
+  $('#sourceRows').innerHTML = (draft.source || []).map((s, i) => `
+    <div class="row row--source" data-kind="source" data-i="${i}">
+      <input type="text" value="${s.device ?? ''}" data-field="device" placeholder="name">
+      <select data-field="kind">
+        ${['local', 'adb'].map((k) =>
+          `<option value="${k}"${s.kind === k ? ' selected' : ''}>${k}</option>`).join('')}
+      </select>
+      <input type="text" value="${s.path ?? ''}" data-field="path"
+             placeholder="${s.kind === 'adb' ? '/sdcard/DCIM' : '/path/to/folder'}">
+      <span class="row__flags">
+        <label title="Delete originals once they have min_copies verified copies">
+          <input type="checkbox" data-field="clear_after_import"${s.clear_after_import ? ' checked' : ''}>clear after import</label>
+      </span>
+      <button class="row__del" data-del="source" data-i="${i}" title="Remove">&times;</button>
+    </div>`).join('')
+    || '<p class="muted">No sources yet. Add one above.</p>';
+}
+
+function collect() {
+  const v = draft.vault = draft.vault || {};
+  v.primary = $('#cfgPrimary').value;
+  v.min_copies = Number($('#cfgMinCopies').value) || 3;
+  v.scrub_days = Number($('#cfgScrubDays').value) || 30;
+  v.require_offline_copy = $('#cfgOffline').checked;
+
+  for (const row of $$('#replicaRows .row, #sourceRows .row')) {
+    const list = row.dataset.kind === 'replica' ? draft.replica : draft.source;
+    const item = list[Number(row.dataset.i)];
+    if (!item) continue;
+    for (const el of row.querySelectorAll('[data-field]')) {
+      const f = el.dataset.field;
+      if (f === 'shard') item.mode = el.checked ? 'shard' : 'full';
+      else item[f] = el.type === 'checkbox' ? el.checked : el.value.trim();
+    }
+  }
+  return draft;
+}
+
+async function saveSettings() {
+  const btn = $('#settingsSave');
+  btn.disabled = true;
+  try {
+    const res = await post('config', { config: collect() });
+    draft = res.config;
+    banner('Saved. The change is live — no restart needed.', 'ok');
+    renderSettings();
+    refreshStatus();
+  } catch (err) {
+    banner(err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function attachSettings() {
+  $('#settingsSave').addEventListener('click', saveSettings);
+  $('#settingsReload').addEventListener('click', () => {
+    loadSettings().then(() => banner('Reloaded from disk.', 'ok'));
+  });
+
+  document.addEventListener('click', (e) => {
+    const add = e.target.closest('[data-add]');
+    if (add && draft) {
+      collect();
+      if (add.dataset.add === 'replica') {
+        (draft.replica = draft.replica || []).push(
+          { name: `drive${draft.replica.length + 1}`, kind: 'local', root: '',
+            offline: true, mode: 'full', capacity: 'auto' });
+      } else {
+        (draft.source = draft.source || []).push(
+          { device: 'phone', kind: 'local', path: '', clear_after_import: false });
+      }
+      renderSettings();
+      return;
+    }
+
+    const del = e.target.closest('[data-del]');
+    if (del && draft) {
+      collect();
+      const list = del.dataset.del === 'replica' ? draft.replica : draft.source;
+      list.splice(Number(del.dataset.i), 1);
+      renderSettings();
+      return;
+    }
+
+    const chip = e.target.closest('[data-drive]');
+    if (chip && draft) {
+      collect();
+      const dr = drives[Number(chip.dataset.drive)];
+      const target = (draft.replica || []).find((r) => !r.root);
+      const row = target || { name: dr.label.toLowerCase().replace(/[^a-z0-9]+/g, ''),
+                              kind: 'local', offline: true, mode: 'full',
+                              capacity: 'auto' };
+      row.root = `${dr.path}/PhotoVault/library`;
+      if (!target) (draft.replica = draft.replica || []).push(row);
+      renderSettings();
+      banner(`Added ${dr.label}. Review the path, then Save.`, 'ok');
+    }
+  });
+
+  // Re-render when a kind changes so placeholders and extra fields follow.
+  document.addEventListener('change', (e) => {
+    if (e.target.matches('.rows [data-field="kind"]') && draft) {
+      collect();
+      renderSettings();
+    }
+  });
 }
 
 /* ---------------------------------------------------------------- timeline */
@@ -411,9 +583,11 @@ function switchView(view) {
   document.title = `PhotoVault · ${PAGE_TITLES[view]}`;
   if (view === 'health') refreshStatus();
   if (view === 'activity') { refreshJobs(); loadEvents(); }
+  if (view === 'settings') loadSettings().catch((e) => banner(e.message, 'bad'));
 }
 
 function attach() {
+  attachSettings();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 

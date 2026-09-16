@@ -14,8 +14,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from photovault import (health, identity, ingest, placement, sync,
-                        verify)
+from photovault import (config, health, identity, importer, ingest,
+                        placement, sync, verify)
 from photovault.catalog import Catalog
 from photovault.config import Config, ReplicaSpec, SourceSpec
 from photovault.replicas import ReplicaError
@@ -728,7 +728,8 @@ class TestInboxWatcher(VaultTestCase):
         removed, notes = watcher.clear_imported(self.cfg, self.cat, self.inbox)
         self.assertEqual(removed, 0)
         self.assertEqual(len(list(self.inbox.rglob("*.jpg"))), 3)
-        self.assertTrue(any("did not verify" in n for n in notes))
+        self.assertTrue(notes and any("verified" in n for n in notes),
+                        f"should explain why nothing was removed, got {notes}")
 
     def test_sources_without_the_flag_are_never_emptied(self):
         """An Apple Photos library is a source you also browse. Deleting from
@@ -772,3 +773,154 @@ class TestInboxWatcher(VaultTestCase):
         self.drop(2)
         self.assertTrue(watcher.wait_until_settled(self.inbox, settle=0.01,
                                                    timeout=5))
+
+
+class TestConfigRoundTrip(unittest.TestCase):
+    """The UI writes this file and the CLI reads it. If they ever disagree,
+    a config edited in the browser silently breaks every command."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="pv-cfg-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.path = self.tmp / "config.toml"
+        self.data = {
+            "vault": {"primary": "mac", "min_copies": 3,
+                      "require_offline_copy": True, "scrub_days": 30,
+                      "catalog": str(self.tmp / "c.db")},
+            "replica": [
+                {"name": "mac", "kind": "local", "root": str(self.tmp / "mac")},
+                {"name": "hdd", "kind": "local", "root": str(self.tmp / "hdd"),
+                 "offline": True, "mode": "shard", "capacity": "500GB"},
+                {"name": "win", "kind": "rsync", "root": "/d/lib",
+                 "host": "me@10.0.0.5"},
+            ],
+            "source": [
+                {"device": "immich", "path": str(self.tmp / "immich")},
+                {"device": "android", "kind": "adb", "path": "/sdcard/DCIM",
+                 "clear_after_import": True},
+            ],
+        }
+
+    def test_dict_survives_a_full_round_trip(self):
+        cfg = config.save(self.data, self.path)
+        again = config.to_dict(cfg)
+        self.assertEqual(again["vault"]["min_copies"], 3)
+        self.assertEqual([r["name"] for r in again["replica"]],
+                         ["mac", "hdd", "win"])
+        self.assertEqual(config.to_dict(config.load(self.path)), again)
+
+    def test_every_field_is_preserved(self):
+        cfg = config.save(self.data, self.path)
+        hdd = cfg.replica("hdd")
+        self.assertTrue(hdd.offline)
+        self.assertEqual(hdd.mode, "shard")
+        self.assertEqual(hdd.capacity, "500GB")
+        self.assertEqual(cfg.replica("win").host, "me@10.0.0.5")
+        android = [s for s in cfg.sources if s.device == "android"][0]
+        self.assertEqual(android.kind, "adb")
+        self.assertTrue(android.clear_after_import)
+
+    def test_invalid_config_is_refused_and_the_old_one_survives(self):
+        config.save(self.data, self.path)
+        original = self.path.read_text()
+
+        broken = dict(self.data)
+        broken["vault"] = dict(self.data["vault"], primary="does-not-exist")
+        with self.assertRaises(KeyError):
+            config.save(broken, self.path)
+        self.assertEqual(self.path.read_text(), original,
+                         "a rejected config must not touch the existing file")
+
+    def test_a_backup_is_kept(self):
+        config.save(self.data, self.path)
+        changed = dict(self.data)
+        changed["vault"] = dict(self.data["vault"], min_copies=4)
+        config.save(changed, self.path)
+        backup = self.path.with_suffix(".toml.bak")
+        self.assertTrue(backup.exists())
+        self.assertIn("min_copies = 3", backup.read_text())
+        self.assertIn("min_copies = 4", self.path.read_text())
+
+    def test_windows_paths_are_escaped(self):
+        data = dict(self.data)
+        data["replica"] = [{"name": "mac", "kind": "local",
+                            "root": "C:\\Users\\Rohit\\PhotoVault"}]
+        data["vault"] = dict(self.data["vault"], primary="mac")
+        data["source"] = []
+        cfg = config.save(data, self.path)
+        self.assertEqual(cfg.replica("mac").root, "C:\\Users\\Rohit\\PhotoVault")
+
+
+class TestReclaim(VaultTestCase):
+    """Deleting from a phone removes the last copy outside PhotoVault, so
+    reclaiming works from re-read bytes, never from the catalog."""
+
+    def setUp(self):
+        super().setUp()
+        self.phone = self.tmp / "phone"
+        self.phone.mkdir()
+        from make_fixtures import jpeg_with_exif
+        for i in range(5):
+            (self.phone / f"IMG_{500 + i}.jpg").write_bytes(
+                jpeg_with_exif(f"2025:06:0{i + 1} 10:00:00", f"phone-{i}".encode() * 60))
+        self.cfg.sources = [SourceSpec("phone", str(self.phone))]
+
+    def test_nothing_is_reclaimable_before_replication(self):
+        ingest.ingest_source(self.cfg, self.cat, "phone", self.phone)
+        rep = importer.reclaimable(self.cfg, self.cat, self.phone)
+        self.assertEqual(len(rep.safe), 0, "one copy is not three")
+        self.assertEqual(len(rep.held), 5)
+
+    def test_reclaimable_once_min_copies_are_verified(self):
+        ingest.ingest_source(self.cfg, self.cat, "phone", self.phone)
+        for name in ("hdd", "win"):
+            sync.push(self.cfg, self.cat, name)
+        rep = importer.reclaimable(self.cfg, self.cat, self.phone)
+        self.assertEqual(len(rep.safe), 5)
+        self.assertEqual(len(rep.held), 0)
+        self.assertGreater(rep.reclaimable_bytes, 0)
+
+    def test_apply_deletes_only_the_safe_ones(self):
+        ingest.ingest_source(self.cfg, self.cat, "phone", self.phone)
+        for name in ("hdd", "win"):
+            sync.push(self.cfg, self.cat, name)
+        # An extra photo that was never imported must survive.
+        from make_fixtures import jpeg_with_exif
+        stray = self.phone / "IMG_NEW.jpg"
+        stray.write_bytes(jpeg_with_exif("2025:07:01 10:00:00", b"unimported" * 60))
+
+        rep = importer.reclaimable(self.cfg, self.cat, self.phone, apply=True)
+        self.assertEqual(rep.deleted, 5)
+        self.assertTrue(stray.exists(), "an unimported photo must never be deleted")
+        self.assertEqual(len(list(self.phone.rglob("*.jpg"))), 1)
+
+    def test_a_missing_drive_reduces_what_can_be_freed(self):
+        """You can only free as much phone storage as you actually earned.
+
+        Note this asserts the guarantee (nothing is deleted), not the detection
+        mechanism: PhotoVault only recognises a genuinely *unplugged* drive for
+        /Volumes mounts, so a vanished directory shows up as a replica that
+        simply cannot produce a matching hash. Either way the count falls short
+        and nothing is removed, which is the property that matters.
+        """
+        ingest.ingest_source(self.cfg, self.cat, "phone", self.phone)
+        for name in ("hdd", "win"):
+            sync.push(self.cfg, self.cat, name)
+        shutil.rmtree(self.tmp / "hdd")
+
+        rep = importer.reclaimable(self.cfg, self.cat, self.phone, apply=True)
+        self.assertEqual(rep.deleted, 0)
+        self.assertEqual(len(list(self.phone.rglob("*.jpg"))), 5)
+        self.assertTrue(all(copies < self.cfg.min_copies
+                            for _, copies, _ in rep.held))
+
+    def test_corrupt_replica_copy_does_not_count(self):
+        ingest.ingest_source(self.cfg, self.cat, "phone", self.phone)
+        for name in ("hdd", "win"):
+            sync.push(self.cfg, self.cat, name)
+        for p in (self.tmp / "hdd").rglob("*.jpg"):
+            p.write_bytes(p.read_bytes() + b"rot")
+
+        rep = importer.reclaimable(self.cfg, self.cat, self.phone, apply=True)
+        self.assertEqual(rep.deleted, 0, "a corrupt copy must not count toward min_copies")
+        self.assertEqual(len(list(self.phone.rglob("*.jpg"))), 5)

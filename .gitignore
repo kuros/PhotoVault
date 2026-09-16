@@ -7,3 +7,6 @@ venv/
 *.db-shm
 .DS_Store
 config.toml
+
+# Immich secrets
+immich/.env

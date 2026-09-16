@@ -28,6 +28,7 @@ class ReplicaSpec:
 class SourceSpec:
     device: str
     path: str
+    kind: str = "local"   # local = a folder; adb = an Android device over USB
     # Inboxes should empty once their photos are safely in the library;
     # a folder you also browse (an Apple Photos library) must never be touched.
     clear_after_import: bool = False
@@ -94,7 +95,8 @@ def load(path: Path | None = None) -> Config:
         require_offline_copy=bool(vault.get("require_offline_copy", True)),
         scrub_days=int(vault.get("scrub_days", 30)),
         replicas=replicas,
-        sources=[SourceSpec(device=s["device"], path=s["path"],
+        sources=[SourceSpec(device=s["device"], path=s.get("path", ""),
+                            kind=s.get("kind", "local"),
                             clear_after_import=bool(s.get("clear_after_import", False)))
                  for s in raw.get("source", [])],
     )
@@ -184,3 +186,115 @@ device = "ipad"
 path = "~/PhotoVault/inbox/ipad"
 clear_after_import = true
 """
+
+
+
+# --------------------------------------------------------------------- writing
+
+def _toml_str(value: str) -> str:
+    """TOML basic string. Paths with backslashes (Windows) must be escaped."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def render(data: dict) -> str:
+    """Render a config dict back to TOML.
+
+    Hand-rolled rather than using a TOML writer: the file is small, the shape
+    is fixed, and this keeps the comments that make the file readable by a
+    human who opens it in six months.
+    """
+    vault = data.get("vault", {})
+    lines = [
+        "# PhotoVault configuration.",
+        "#",
+        "# Every photo must exist on `min_copies` independent devices, at least",
+        "# one of them normally unplugged.",
+        "",
+        "[vault]",
+        f'primary = {_toml_str(vault.get("primary", "mac"))}',
+        f'min_copies = {int(vault.get("min_copies", 3))}',
+        f'require_offline_copy = {str(bool(vault.get("require_offline_copy", True))).lower()}',
+        f'scrub_days = {int(vault.get("scrub_days", 30))}',
+    ]
+    if vault.get("catalog"):
+        lines.append(f'catalog = {_toml_str(vault["catalog"])}')
+
+    lines += ["", "# ---------------------------------------------------------- replicas"]
+    for r in data.get("replica", []):
+        lines += ["", "[[replica]]",
+                  f'name = {_toml_str(r["name"])}',
+                  f'kind = {_toml_str(r.get("kind", "local"))}',
+                  f'root = {_toml_str(r["root"])}']
+        if r.get("host"):
+            lines.append(f'host = {_toml_str(r["host"])}')
+        if r.get("offline"):
+            lines.append("offline = true")
+        if r.get("mode", "full") != "full":
+            lines.append(f'mode = {_toml_str(r["mode"])}')
+        if r.get("capacity") and r["capacity"] != "auto":
+            lines.append(f'capacity = {_toml_str(r["capacity"])}')
+
+    lines += ["", "# ----------------------------------------------------------- sources",
+              "# Read-only: PhotoVault copies out of these and never modifies them,",
+              "# unless clear_after_import is set on an inbox folder."]
+    for src in data.get("source", []):
+        lines += ["", "[[source]]",
+                  f'device = {_toml_str(src["device"])}']
+        if src.get("kind", "local") != "local":
+            lines.append(f'kind = {_toml_str(src["kind"])}')
+        if src.get("path"):
+            lines.append(f'path = {_toml_str(src["path"])}')
+        if src.get("clear_after_import"):
+            lines.append("clear_after_import = true")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def to_dict(cfg: "Config") -> dict:
+    """The inverse of load(), for handing the current config to the UI."""
+    return {
+        "vault": {
+            "primary": cfg.primary, "min_copies": cfg.min_copies,
+            "require_offline_copy": cfg.require_offline_copy,
+            "scrub_days": cfg.scrub_days, "catalog": str(cfg.catalog_path),
+        },
+        "replica": [
+            {"name": r.name, "kind": r.kind, "root": r.root, "host": r.host,
+             "offline": r.offline, "mode": r.mode, "capacity": r.capacity}
+            for r in cfg.replicas
+        ],
+        "source": [
+            {"device": s.device, "kind": s.kind, "path": s.path,
+             "clear_after_import": s.clear_after_import}
+            for s in cfg.sources
+        ],
+    }
+
+
+def save(data: dict, path: Path) -> Config:
+    """Validate a config dict, then write it atomically, keeping one backup.
+
+    Validation happens by rendering to TOML and loading it back through the
+    ordinary load() path, so the UI cannot produce a config the CLI would
+    reject. A config that fails to parse would take the whole system down, so
+    nothing is written until a full round-trip succeeds.
+    """
+    import tempfile
+
+    text = render(data)
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
+        fh.write(text)
+        probe = Path(fh.name)
+    try:
+        cfg = load(probe)          # raises on anything malformed
+    finally:
+        probe.unlink(missing_ok=True)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.with_suffix(path.suffix + ".bak").write_text(path.read_text())
+    tmp = path.with_suffix(path.suffix + ".new")
+    tmp.write_text(text)
+    tmp.replace(path)              # atomic: never a half-written config
+    cfg.source_path = path
+    return cfg

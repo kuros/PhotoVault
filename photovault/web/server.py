@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .. import config as configmod
 from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
@@ -32,18 +33,51 @@ STATIC_DIR = Path(__file__).parent / "static"
 _local = threading.local()
 
 
+class AppState:
+    """Holds the live config. Editing it from the UI swaps `cfg` and bumps
+    `generation`, which each worker thread notices and reopens its catalog
+    against - the catalog path itself can change."""
+
+    def __init__(self, cfg: Config, config_path: Path):
+        self.cfg = cfg
+        self.config_path = config_path
+        self.jobs = JobRunner(cfg)
+        self.generation = 0
+        self.lock = threading.Lock()
+
+    def replace(self, cfg: Config) -> None:
+        with self.lock:
+            self.cfg = cfg
+            self.jobs.cfg = cfg
+            self.generation += 1
+
+
 class VaultHandler(BaseHTTPRequestHandler):
-    cfg: Config
-    jobs: JobRunner
+    state: AppState
     server_version = "PhotoVault"
+
+    @property
+    def cfg(self) -> Config:
+        return self.state.cfg
+
+    @property
+    def jobs(self) -> JobRunner:
+        return self.state.jobs
 
     # Each worker thread keeps its own SQLite connection, for the same reason
     # jobs do: connections are not safe to share across threads.
     @property
     def catalog(self) -> Catalog:
         cat = getattr(_local, "catalog", None)
-        if cat is None:
+        gen = getattr(_local, "generation", -1)
+        if cat is None or gen != self.state.generation:
+            if cat is not None:
+                cat.close()
             cat = _local.catalog = Catalog(self.cfg.catalog_path)
+            _local.generation = self.state.generation
+            for spec in self.cfg.replicas:
+                cat.upsert_replica(spec.name, spec.kind, spec.root,
+                                   host=spec.host, is_offline=spec.offline)
         return cat
 
     def log_message(self, fmt, *args):
@@ -85,6 +119,8 @@ class VaultHandler(BaseHTTPRequestHandler):
                 return self._json({"cancelled": ok})
             if url.path == "/api/thumbs/clear":
                 return self._json({"cleared": thumbs.clear_cache()})
+            if url.path == "/api/config":
+                return self._save_config(body)
         except TypeError as exc:
             return self._json({"error": f"bad parameters: {exc}"}, 400)
         except Exception as exc:
@@ -202,11 +238,54 @@ class VaultHandler(BaseHTTPRequestHandler):
                 "sources": [{"device": s.device, "path": s.path}
                             for s in self.cfg.sources]})
 
+        if name == "config":
+            return self._json({
+                "path": str(self.state.config_path),
+                "config": configmod.to_dict(self.cfg),
+                "toml": configmod.render(configmod.to_dict(self.cfg)),
+            })
+
+        if name == "drives":
+            from ..wizard import find_drives
+            from ..placement import usable_capacity
+            drives = [{"label": d.label, "path": str(d.path),
+                       "total": d.total, "free": d.free} for d in find_drives()]
+            return self._json({
+                "drives": drives,
+                "home": str(Path.home()),
+                "configured": [r.root for r in self.cfg.replicas],
+            })
+
         if name == "log":
             return self._json({"events": [
                 dict(e) for e in cat.recent_events(int(q.get("limit", 40)))]})
 
         return self._json({"error": "not found"}, 404)
+
+    def _save_config(self, body: dict):
+        """Validate and persist a config edited in the UI.
+
+        configmod.save() renders to TOML and loads it back through the ordinary
+        parser before writing anything, so the UI cannot produce a file the CLI
+        would reject. It also keeps a .bak and writes atomically - a truncated
+        config would take the whole system down.
+        """
+        if self.jobs.running:
+            return self._json(
+                {"error": "an operation is running; wait for it to finish"}, 409)
+        data = body.get("config")
+        if not isinstance(data, dict):
+            return self._json({"error": "expected a 'config' object"}, 400)
+        try:
+            cfg = configmod.save(data, self.state.config_path)
+        except (ValueError, KeyError, TypeError) as exc:
+            return self._json({"error": f"invalid config: {exc}"}, 400)
+        except OSError as exc:
+            return self._json({"error": f"could not write config: {exc}"}, 500)
+
+        self.state.replace(cfg)
+        return self._json({"saved": True, "path": str(self.state.config_path),
+                           "config": configmod.to_dict(cfg)})
 
     # ------------------------------------------------------------- responders
 
@@ -247,9 +326,10 @@ class VaultHandler(BaseHTTPRequestHandler):
 
 
 def serve(cfg: Config, host: str = "127.0.0.1", port: int = 8723,
-          open_browser: bool = True) -> None:
-    handler = type("BoundHandler", (VaultHandler,),
-                   {"cfg": cfg, "jobs": JobRunner(cfg)})
+          open_browser: bool = True, config_path: Path | None = None) -> None:
+    state = AppState(cfg, config_path or cfg.source_path
+                     or configmod.DEFAULT_CONFIG_PATH)
+    handler = type("BoundHandler", (VaultHandler,), {"state": state})
     httpd = ThreadingHTTPServer((host, port), handler)
     url = f"http://{host}:{port}/"
 

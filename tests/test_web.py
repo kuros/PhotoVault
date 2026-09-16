@@ -21,8 +21,7 @@ from pathlib import Path
 from photovault import ingest, sync
 from photovault.catalog import Catalog
 from photovault.config import Config, ReplicaSpec, SourceSpec
-from photovault.web.jobs import JobRunner
-from photovault.web.server import VaultHandler
+from photovault.web.server import AppState, VaultHandler
 
 from make_fixtures import build as build_fixtures
 
@@ -52,8 +51,9 @@ class WebTestCase(unittest.TestCase):
         sync.push(self.cfg, cat, "hdd")
         cat.close()
 
-        handler = type("T", (VaultHandler,),
-                       {"cfg": self.cfg, "jobs": JobRunner(self.cfg)})
+        self.config_path = self.tmp / "config.toml"
+        self.state = AppState(self.cfg, self.config_path)
+        handler = type("T", (VaultHandler,), {"state": self.state})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -215,3 +215,75 @@ class TestThumbnails(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestConfigApi(WebTestCase):
+    """The UI writes the same file the CLI reads, so a bad write is a system
+    outage, not a cosmetic bug."""
+
+    def setUp(self):
+        super().setUp()
+        from photovault import config as configmod
+        configmod.save(configmod.to_dict(self.cfg), self.config_path)
+
+    def test_get_returns_the_live_config(self):
+        body = self.get("/api/config")
+        self.assertEqual(body["path"], str(self.config_path))
+        self.assertEqual([r["name"] for r in body["config"]["replica"]],
+                         ["mac", "hdd", "win"])
+        self.assertIn("[vault]", body["toml"])
+
+    def test_save_applies_without_a_restart(self):
+        body = self.get("/api/config")
+        body["config"]["vault"]["min_copies"] = 2
+        res = self.post("/api/config", {"config": body["config"]})
+        self.assertTrue(res["saved"])
+        # The running server must reflect it immediately.
+        self.assertEqual(self.get("/api/status")["min_copies"], 2)
+        self.assertIn("min_copies = 2", self.config_path.read_text())
+
+    def test_adding_a_replica_through_the_api_works_end_to_end(self):
+        body = self.get("/api/config")
+        body["config"]["replica"].append({
+            "name": "hdd2", "kind": "local", "root": str(self.tmp / "hdd2"),
+            "offline": True, "mode": "full", "capacity": "auto"})
+        self.post("/api/config", {"config": body["config"]})
+
+        names = [r["name"] for r in self.get("/api/status")["replicas"]]
+        self.assertIn("hdd2", names)
+        # And a job against the new replica succeeds, proving the catalog was
+        # updated too, not just the in-memory config.
+        self.post("/api/jobs", {"action": "sync", "replica": "hdd2"})
+        self.wait_idle()
+        job = self.get("/api/jobs")["jobs"][0]
+        self.assertEqual(job["state"], "done")
+        self.assertEqual(job["result"]["copied"], 13)
+
+    def test_invalid_config_is_rejected_and_nothing_is_written(self):
+        before = self.config_path.read_text()
+        body = self.get("/api/config")
+        body["config"]["vault"]["primary"] = "nonexistent"
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.post("/api/config", {"config": body["config"]})
+        self.assertEqual(cm.exception.code, 400)
+        self.assertEqual(self.config_path.read_text(), before)
+
+    def test_save_is_refused_while_a_job_is_running(self):
+        """Swapping the config mid-operation would have a job finish against
+        replicas that no longer exist."""
+        self.post("/api/jobs", {"action": "sync"})
+        body = self.get("/api/config")
+        try:
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.post("/api/config", {"config": body["config"]})
+            self.assertEqual(cm.exception.code, 409)
+        finally:
+            self.wait_idle()
+
+    def test_drives_endpoint_reports_something_sane(self):
+        body = self.get("/api/drives")
+        self.assertIn("drives", body)
+        self.assertIsInstance(body["drives"], list)
+        for d in body["drives"]:
+            self.assertIn("free", d)
+            self.assertIn("path", d)

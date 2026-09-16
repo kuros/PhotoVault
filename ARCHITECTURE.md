@@ -399,3 +399,61 @@ workflow: sync first, rebalance second.
 > **The general lesson:** when a test fails for a reason you did not predict, the
 > explanation is worth more than the fix. This one turned an accident of the
 > implementation into a stated guarantee.
+
+---
+
+## Decision 10: the UI writes the same file the CLI reads
+
+The Settings tab edits `config.toml` directly rather than keeping its own settings store.
+One file, one parser, no drift — the alternative is a UI database that silently disagrees
+with what the CLI loads, and you find out during a restore.
+
+That makes a bad write an outage, so `config.save()` renders to TOML and **loads it back
+through the ordinary `load()` path** before touching the real file. The UI cannot produce
+a config the CLI would reject, because the CLI's own parser is the validator. Then: keep
+a `.bak`, write to a temp file, `rename()` into place. The same atomic-write pattern as
+`LocalDriver.put` — a truncated config is as fatal as a half-copied photo.
+
+Two refusals worth noting, both about ordering rather than validity:
+
+- **No saving while a job runs.** A sync that started against three replicas should not
+  finish against two.
+- **A rejected config leaves the old file untouched**, rather than being half-applied.
+
+> **The general lesson:** when two interfaces share state, make one of them the format of
+> record and validate through the real consumer. A second source of truth that "should"
+> stay in sync is a bug with a delay on it.
+
+---
+
+## Decision 11: evidence, not belief, gates deletion
+
+Three operations now delete data — `rebalance`, inbox clearing, and `reclaim` — and all
+three answer the same question: *is it safe to remove this copy?* They share one rule:
+
+**Count only copies that have been re-read and re-hashed right now.** A `placement` row
+saying `present` is a belief formed at some point in the past. Deleting the last good
+copy because of a stale belief is precisely the failure this program exists to prevent.
+
+This has a consequence users feel directly, and it is the correct one: **you can only
+free as much phone storage as you actually earned.** If you didn't plug in the offline
+drive, those photos have two verified copies rather than three, and `reclaim` holds them
+back. The tool doesn't let you spend redundancy you don't have.
+
+### An ordering bug this discipline exposed
+
+Inbox clearing originally verified only the primary copy. Tightening it to the shared
+`min_copies` rule immediately broke the watcher — and the failure was *correct*:
+
+```
+run_once():  ingest → clear → replicate      # clear ran before the evidence existed
+```
+
+At clear time only the primary held a copy, so a rule demanding three could never be
+satisfied and everything was held back. The fix is the obvious reordering, but the bug
+was invisible under the weaker rule, because with a one-copy bar the ordering didn't
+matter.
+
+> **The general lesson:** strengthening a check often reveals that some *sequence* was
+> only ever correct by accident. The test that caught this was asserting a behaviour
+> ("the inbox empties"), not an implementation — which is why it noticed.

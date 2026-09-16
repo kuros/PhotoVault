@@ -76,47 +76,25 @@ def wait_until_settled(root: Path, *, settle: float = SETTLE_SECONDS,
 
 
 def clear_imported(cfg: Config, catalog: Catalog, root: Path) -> tuple[int, list[str]]:
-    """Delete inbox files that are safely in the library, and only those.
+    """Delete inbox files that provably have `min_copies` verified copies.
 
-    An inbox that never empties grows a second copy of the whole library on the
-    Mac. Clearing it is safe only when the photo is genuinely stored: we re-read
-    the file in the primary library and confirm its bytes hash to the same
-    value. A catalog row is not enough - this deletes originals.
+    Deleting an inbox original removes the last copy outside PhotoVault, so
+    this uses exactly the same evidence bar as clearing a phone: replicas are
+    asked to re-hash the stored bytes, and drives that were not connected
+    simply do not count.
     """
-    from .hashing import hash_file
+    from .importer import reclaimable
 
-    primary_root = cfg.primary_root
-    removed, notes = 0, []
-    for path in iter_media(root):
-        if normalize_ext(path) not in WANTED_EXT:
-            continue
-        try:
-            digest, _ = hash_file(path)
-        except OSError as exc:
-            notes.append(f"{path}: {exc}")
-            continue
-
-        asset = catalog.asset(digest)
-        if asset is None:
-            continue  # not imported yet; leave it alone
-
-        stored = primary_root / asset["rel_path"]
-        try:
-            if not stored.is_file() or hash_file(stored)[0] != digest:
-                notes.append(f"kept {path.name}: library copy did not verify")
-                continue
-            path.unlink()
-        except OSError as exc:
-            notes.append(f"{path}: {exc}")
-            continue
-        removed += 1
-    return removed, notes
+    report = reclaimable(cfg, catalog, root, apply=True)
+    notes = [f"kept {p.name}: {why}" for p, _, why in report.held[:10]]
+    return report.deleted, notes
 
 
 def run_once(cfg: Config, catalog: Catalog, *, clear: bool = False,
              report=print) -> WatchStats:
     """One pass: import anything new from every source, then replicate."""
     stats = WatchStats(cycles=1)
+    pending_clear: list[tuple] = []
 
     for src in cfg.sources:
         root = Path(src.path).expanduser()
@@ -136,14 +114,12 @@ def run_once(cfg: Config, catalog: Catalog, *, clear: bool = False,
         stats.errors.extend(st.errors[:5])
         if st.imported:
             report(f"  {src.device}: imported {st.imported}")
+        pending_clear.append((src, root))
 
-        if clear or src.clear_after_import:
-            n, notes = clear_imported(cfg, catalog, root)
-            stats.cleared += n
-            stats.errors.extend(notes[:5])
-            if n:
-                report(f"  {src.device}: cleared {n} from the inbox")
-
+    # Replicate BEFORE clearing. Clearing requires min_copies verified copies,
+    # and at ingest time only the primary has one - so clearing first would
+    # always hold everything back. The evidence has to exist before the
+    # deletion step asks for it.
     if stats.imported:
         from . import sync as sync_mod
         for spec in cfg.replicas:
@@ -157,6 +133,14 @@ def run_once(cfg: Config, catalog: Catalog, *, clear: bool = False,
             except ReplicaError as exc:
                 if not spec.offline:
                     stats.errors.append(f"{spec.name}: {exc}")
+
+    for src, root in pending_clear:
+        if clear or src.clear_after_import:
+            n, notes = clear_imported(cfg, catalog, root)
+            stats.cleared += n
+            stats.errors.extend(notes[:5])
+            if n:
+                report(f"  {src.device}: cleared {n} from the inbox")
     return stats
 
 
