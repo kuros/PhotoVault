@@ -654,3 +654,65 @@ Adding `deleted_at` meant auditing every query that means "my library":
 > **The general lesson:** a soft-delete flag is never one column. It is a question asked
 > of every existing read: *does this one mean the library, or the files on disk?* Getting
 > that wrong is how deleted items quietly come back.
+
+
+---
+
+## Decision 16: the catalog stopped being disposable, so it needed backing up
+
+[Decision 2](#decision-2-the-catalog-is-disposable) claimed losing `catalog.db` costs CPU
+time, not photos. That was true when the catalog held only facts derivable from the
+files. It is no longer true, and the change crept in one feature at a time:
+
+- `dup_decision` — which photo you chose to keep out of a near-identical group
+- `deleted_at` — what you trashed, and when
+- `replica.uuid` / `last_synced_at` — drive identity and rotation state
+
+The first two are *judgement*. No amount of re-reading files reconstructs a decision.
+There is a test asserting the gap directly: after a rebuild, photos come back and
+decisions do not.
+
+> **The general lesson:** a "purely derived" store rarely stays that way. Every feature
+> that records a user's choice moves a little authority into it. Worth re-asking
+> periodically: *is this still rebuildable, or have I quietly been accumulating originals
+> in a cache?*
+
+### A plain copy of a WAL database is not a backup
+
+The demonstration that settled the implementation:
+
+```
+plain cp of live.db      : UNUSABLE — no such table: t
+sqlite3 backup API       : 5000 rows
+```
+
+In WAL mode committed transactions live in the `-wal` file until a checkpoint, so copying
+the main database alone can produce a file missing not just recent rows but every table
+ever created. `snapshot()` uses SQLite's backup API, which is consistent against a live
+database.
+
+My own test then fell into the same trap: it asserted the compressed snapshot was smaller
+than `catalog.db`, which was still 4 KB because the 20,000 rows under test sat in the WAL.
+The honest comparison is compressed snapshot versus uncompressed snapshot. Worth recording
+because knowing the pitfall did not stop me writing it.
+
+### Backups rotate, so they cannot be library assets
+
+The library's contract is that nothing ever leaves — that is what makes `rebuild` and
+`scrub` sound. Backups need the opposite. A weekly snapshot in a content-addressed store
+is a new hash every time (no dedup: the bytes genuinely differ), retained forever.
+
+So they live in `.photovault-backups/` inside each replica root — replicated and
+hash-verified by the same drivers, pruned to the newest N, and invisible to the catalog.
+Same reasoning will apply to Immich's pg_dump and the album manifest when those land.
+
+> **The general lesson:** two kinds of durability were being conflated. "Never lose this"
+> and "keep the last few of these" are different requirements, and one store cannot honour
+> both.
+
+### One bug worth naming
+
+`verify()` caught `OSError` when reading a gzip. A corrupted archive raises `zlib.error`,
+which is **not** an `OSError` — so a damaged backup produced a traceback instead of
+`False`. The function whose entire job is detecting damage was the one that crashed on
+finding it. Caught by deliberately corrupting a snapshot rather than by reading the code.

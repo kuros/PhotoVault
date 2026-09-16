@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import (__version__, config, duplicates, health, importer, ingest,
-               placement, sync, trash, verify)
+from . import (__version__, backups, config, duplicates, health, importer,
+               ingest, placement, sync, trash, verify)
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -353,6 +353,13 @@ def cmd_status(args) -> int:
     if h.never_verified:
         print(f"  {YELLOW}...{RESET}  {h.never_verified:,} copies never verified "
               f"- run 'photovault scrub'")
+
+    age = backups.age_days(cfg)
+    if age is None:
+        print(f"  {YELLOW}...{RESET}  the catalog has never been backed up "
+              f"- run 'photovault backup'")
+    elif age > 14:
+        print(f"  {YELLOW}...{RESET}  catalog backup is {int(age)} days old")
 
     if not h.ok:
         print(f"\n{DIM}Fix with: photovault sync --all{RESET}")
@@ -886,6 +893,77 @@ def cmd_trash(args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    """Copy the catalog to every device, or restore it from one.
+
+    The catalog is mostly derivable from the files, but not entirely: duplicate
+    decisions and trash state exist nowhere else. Those are judgement, and
+    rebuild cannot recreate judgement.
+    """
+    cfg, cat = _load(args)
+    cat.close()
+
+    if args.list or args.restore:
+        snaps = backups.available(cfg)
+        if not snaps:
+            print("No catalog backups found on any connected device.")
+            return 1
+
+        if args.list:
+            print(f"{BOLD}{'when':<20}{'size':>10}  {'device':<10}name{RESET}")
+            for s in snaps[:args.show]:
+                print(f"{s.when:%Y-%m-%d %H:%M}    {human(s.size):>10}  "
+                      f"{s.replica:<10}{s.name}")
+            return 0
+
+        chosen = snaps[0]
+        if isinstance(args.restore, str):
+            matches = [s for s in snaps if args.restore in s.name]
+            if not matches:
+                print(f"{RED}no backup matching {args.restore!r}{RESET}")
+                return 1
+            chosen = matches[0]
+
+        print(f"Restoring {BOLD}{chosen.name}{RESET} from {chosen.replica} "
+              f"({chosen.when:%Y-%m-%d %H:%M})")
+        if not backups.verify(chosen):
+            print(f"{RED}checksum mismatch - this backup is damaged{RESET}")
+            return 1
+        print(f"  {GREEN}checksum OK{RESET}")
+        if not args.yes:
+            reply = input("Replace the current catalog? The existing one is kept "
+                          "alongside. [y/N] ")
+            if reply.strip().lower() not in ("y", "yes"):
+                print("cancelled")
+                return 1
+        aside = backups.restore(cfg, chosen, dry_run=False)
+        print(f"{GREEN}Restored.{RESET}")
+        if aside:
+            print(f"{DIM}Previous catalog kept at {aside}{RESET}")
+        print(f"{DIM}Run 'photovault reconcile --all' to re-check what each "
+              f"device holds.{RESET}")
+        return 0
+
+    res = backups.run(cfg, keep=args.keep or cfg.backup_keep)
+    print(f"{BOLD}{res.name}{RESET}  {human(res.size)}  "
+          f"{DIM}sha256 {res.digest[:16]}{RESET}")
+    for name in res.copied:
+        print(f"  {GREEN}copied{RESET}      {name}")
+    for name in res.unreachable:
+        spec = next((r for r in cfg.replicas if r.name == name), None)
+        tone = DIM if (spec and spec.offline) else YELLOW
+        print(f"  {tone}not connected{RESET} {name}")
+    for err in res.errors:
+        print(f"  {RED}{err}{RESET}")
+    if res.pruned:
+        print(f"{DIM}Removed {res.pruned} snapshot(s) beyond the "
+              f"{args.keep or cfg.backup_keep} kept.{RESET}")
+    if not res.copied:
+        print(f"{RED}Nowhere to back up to - no device was reachable.{RESET}")
+        return 1
+    return 0
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -1054,6 +1132,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true")
     s.add_argument("--show", type=int, default=20)
     s.set_defaults(func=cmd_trash)
+
+    s = sub.add_parser("backup",
+                       help="copy the catalog to every device, or restore it")
+    s.add_argument("--list", action="store_true", help="show available backups")
+    s.add_argument("--restore", nargs="?", const=True, metavar="NAME",
+                   help="restore the newest backup, or one matching NAME")
+    s.add_argument("--keep", type=int, help="snapshots to keep per device")
+    s.add_argument("--show", type=int, default=15)
+    s.add_argument("-y", "--yes", action="store_true")
+    s.set_defaults(func=cmd_backup)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

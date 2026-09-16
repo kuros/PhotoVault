@@ -56,6 +56,7 @@ class Config:
     require_offline_copy: bool = True
     scrub_days: int = 30
     trash_days: int = 30
+    backup_keep: int = 10
     catalog_path: Path = field(default_factory=lambda: Path.home() / ".config" / "photovault" / "catalog.db")
     replicas: list[ReplicaSpec] = field(default_factory=list)
     sources: list[SourceSpec] = field(default_factory=list)
@@ -112,6 +113,7 @@ def load(path: Path | None = None) -> Config:
         require_offline_copy=bool(vault.get("require_offline_copy", True)),
         scrub_days=int(vault.get("scrub_days", 30)),
         trash_days=int(vault.get("trash_days", 30)),
+        backup_keep=int(vault.get("backup_keep", 10)),
         replicas=replicas,
         sources=[SourceSpec(device=s["device"], path=s.get("path", ""),
                             kind=s.get("kind", "local"),
@@ -240,6 +242,7 @@ def render(data: dict) -> str:
         f'require_offline_copy = {str(bool(vault.get("require_offline_copy", True))).lower()}',
         f'scrub_days = {int(vault.get("scrub_days", 30))}',
         f'trash_days = {int(vault.get("trash_days", 30))}',
+        f'backup_keep = {int(vault.get("backup_keep", 10))}',
     ]
     if vault.get("catalog"):
         lines.append(f'catalog = {_toml_str(vault["catalog"])}')
@@ -289,6 +292,7 @@ def to_dict(cfg: "Config") -> dict:
             "primary": cfg.primary, "min_copies": cfg.min_copies,
             "require_offline_copy": cfg.require_offline_copy,
             "scrub_days": cfg.scrub_days, "trash_days": cfg.trash_days,
+            "backup_keep": cfg.backup_keep,
             "catalog": str(cfg.catalog_path),
         },
         "replica": [

@@ -120,6 +120,7 @@ python3 -m photovault status      # am I actually protected?
 | `duplicates` | Find near-duplicates; `--apply --yes` to act on your review |
 | `delete <photo>` | Move photos to the trash |
 | `trash` | List, `--restore`, or `--purge` deleted photos |
+| `backup` | Copy the catalog to every device; `--restore` to recover it |
 | `log` | Recent operations |
 | `ui` | Open the web interface in your browser |
 
@@ -466,6 +467,65 @@ Files stream to disk rather than being buffered, so a 500 MB video does not beco
 500 MB of server memory. A truncated upload is discarded rather than left as a partial
 file — a half-received photo hashes as a different, corrupt asset, and PhotoVault would
 then faithfully replicate that corruption everywhere.
+
+---
+
+## Backing up the catalog
+
+For most of its life the catalog was purely derived data — lose it, run `rebuild` and
+`reconcile`, get it back. **That is no longer entirely true.** It now also holds things
+nothing else records:
+
+- **duplicate review decisions** — which photo you chose to keep
+- **trash state** — what you deleted, and when
+- drive identities and last-synced times
+
+None of that can be reconstructed by reading the files. It's judgement, not data, and
+`rebuild` cannot recreate judgement.
+
+```bash
+python3 -m photovault backup
+```
+
+```
+catalog-20260917-035340.db.gz  2.5 MB  sha256 49a9eb2ffdb32308
+  copied      mac
+  copied      hdd1
+```
+
+A compressed snapshot goes to `.photovault-backups/` on every reachable device, with a
+`.sha256` beside it, keeping the newest `backup_keep` (default 10). `status` nags when
+the newest backup is over two weeks old.
+
+```bash
+python3 -m photovault backup --list
+python3 -m photovault backup --restore            # newest verified snapshot
+python3 -m photovault backup --restore 20260917   # or one matching a name
+```
+
+Restoring **moves the current catalog aside** rather than overwriting it, so restoring
+the wrong snapshot costs you a rename. A snapshot that fails its checksum is refused.
+
+### Why not just copy catalog.db?
+
+Because it doesn't work. The catalog runs in **WAL mode**, where committed data lives
+partly in the `-wal` file. A plain `cp` of the main file can lose not merely recent rows
+but entire tables:
+
+```
+plain cp of live.db      : UNUSABLE — no such table: t
+sqlite3 backup API       : 5000 rows
+```
+
+`backup` uses SQLite's own backup API, which takes a consistent snapshot of a live
+database while PhotoVault is still running.
+
+### Why backups aren't stored as photos
+
+Backups rotate; the library never forgets. Putting a fresh snapshot into a
+content-addressed store every week means a brand-new asset each time — no dedup possible,
+and unbounded growth. They live in their own tree on each replica instead: replicated and
+hash-verified by the same machinery, but outside the catalog.
 
 ---
 
@@ -824,9 +884,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-149 tests covering ingest, deduplication, replication, corruption repair, catalog
+164 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, and the trash lifecycle.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, and catalog backup and restore.
 
 ---
 
