@@ -15,6 +15,7 @@ const state = {
   total: 0,
   viewerIndex: -1,
   busy: false,
+  lastJobSignature: '',
 };
 
 const PAGE_TITLES = { photos: 'Photos', health: 'Health',
@@ -184,6 +185,179 @@ async function renderPlan() {
 }
 
 
+
+
+/* ----------------------------------------------------------------- uploads */
+
+const MEDIA_EXT = new Set([
+  'jpg', 'jpeg', 'png', 'heic', 'heif', 'tif', 'tiff', 'gif', 'webp', 'bmp',
+  'dng', 'cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2',
+  'mov', 'mp4', 'm4v', 'avi', 'mkv', '3gp', 'mts', 'm2ts', 'webm',
+]);
+
+const upload = { queue: [], done: 0, bytes: 0, total: 0, cancelled: false,
+                 running: false, errors: [] };
+
+const isMedia = (name) => MEDIA_EXT.has((name.split('.').pop() || '').toLowerCase());
+
+/** Walk a dropped directory. The DataTransfer entry API is the only way to
+ *  see inside a dropped folder; a plain `files` list gives only the top level. */
+async function readEntry(entry, prefix = '') {
+  if (entry.isFile) {
+    const file = await new Promise((res, rej) => entry.file(res, rej));
+    return isMedia(file.name) ? [{ file, path: prefix + file.name }] : [];
+  }
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader();
+  const out = [];
+  // readEntries returns at most ~100 per call, so it must be drained in a loop.
+  for (;;) {
+    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    if (!batch.length) break;
+    for (const child of batch) {
+      out.push(...await readEntry(child, `${prefix}${entry.name}/`));
+    }
+  }
+  return out;
+}
+
+function enqueue(items) {
+  const fresh = items.filter((i) => isMedia(i.path));
+  if (!fresh.length) {
+    toast('Nothing to upload — no photos or videos in that selection.');
+    return;
+  }
+  upload.queue.push(...fresh);
+  upload.total += fresh.reduce((n, i) => n + i.file.size, 0);
+  if (!upload.running) runUploads();
+}
+
+async function runUploads() {
+  upload.running = true;
+  upload.cancelled = false;
+  $('#uploadPanel').hidden = false;
+  $('#uploadErrors').innerHTML = '';
+
+  const CONCURRENCY = 3;
+  const workers = Array.from({ length: CONCURRENCY }, async () => {
+    while (upload.queue.length && !upload.cancelled) {
+      const item = upload.queue.shift();
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          headers: { 'X-PV-Path': encodeURIComponent(item.path),
+                     'Content-Type': 'application/octet-stream' },
+          body: item.file,
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          upload.errors.push(`${item.path}: ${err.error || res.status}`);
+        }
+      } catch (err) {
+        upload.errors.push(`${item.path}: ${err.message}`);
+      }
+      upload.done += 1;
+      upload.bytes += item.file.size;
+      renderUploadProgress();
+    }
+  });
+  await Promise.all(workers);
+
+  upload.running = false;
+  $('#uploadPanel').hidden = true;
+  const failed = upload.errors.length;
+  upload.queue = []; upload.done = 0; upload.bytes = 0; upload.total = 0;
+  upload.errors = [];
+  toast(upload.cancelled ? 'Upload cancelled'
+        : failed ? `Uploaded with ${failed} problem${failed === 1 ? '' : 's'}`
+        : 'Upload complete');
+  loadStaged();
+}
+
+function renderUploadProgress() {
+  const pct = upload.total ? Math.min(100, (upload.bytes / upload.total) * 100) : 0;
+  $('#uploadFill').style.width = `${pct}%`;
+  $('#uploadNote').textContent =
+    `${num(upload.done)} of ${num(upload.done + upload.queue.length)} files`
+    + ` · ${bytes(upload.bytes)}`;
+  if (upload.errors.length) {
+    $('#uploadErrors').innerHTML =
+      upload.errors.slice(-8).map((e) => `<li>${e.replace(/</g, '&lt;')}</li>`).join('');
+  }
+}
+
+async function loadStaged() {
+  let s;
+  try { s = await api('uploads'); } catch { return; }
+  const panel = $('#stagedPanel');
+  panel.hidden = s.files === 0;
+  if (!s.files) return;
+  $('#stagedNote').textContent =
+    `${num(s.files)} file${s.files === 1 ? '' : 's'} · ${bytes(s.bytes)}`
+    + ` — not in your library yet.`;
+}
+
+function attachUploads() {
+  $('#addPhotos').addEventListener('click', () => {
+    // A folder picker cannot also accept loose files, so offer the choice.
+    if (confirm('Add a whole folder?\n\nOK — choose a folder (sub-folders included)'
+                + '\nCancel — choose individual files')) {
+      $('#folderPicker').click();
+    } else {
+      $('#filePicker').click();
+    }
+  });
+
+  for (const id of ['filePicker', 'folderPicker']) {
+    $(`#${id}`).addEventListener('change', (e) => {
+      const items = Array.from(e.target.files).map((file) => ({
+        file, path: file.webkitRelativePath || file.name }));
+      e.target.value = '';
+      enqueue(items);
+    });
+  }
+
+  $('#uploadCancel').addEventListener('click', () => { upload.cancelled = true; });
+
+  $('#stagedImport').addEventListener('click', () => {
+    $('#stagedPanel').hidden = true;
+    startJob('upload_ingest');
+  });
+
+  $('#stagedDiscard').addEventListener('click', async () => {
+    if (!confirm('Discard the uploaded files that have not been imported yet?')) return;
+    const res = await post('uploads/discard', {});
+    toast(`Discarded ${num(res.discarded)} files`);
+    loadStaged();
+  });
+
+  let depth = 0;
+  window.addEventListener('dragenter', (e) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    depth += 1;
+    $('#dropzone').hidden = false;
+  });
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('dragleave', () => {
+    // dragleave fires for every child element, so count enter/leave pairs.
+    depth = Math.max(0, depth - 1);
+    if (!depth) $('#dropzone').hidden = true;
+  });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    depth = 0;
+    $('#dropzone').hidden = true;
+    const entries = Array.from(e.dataTransfer.items || [])
+      .map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+    if (entries.length) {
+      const nested = await Promise.all(entries.map((en) => readEntry(en)));
+      enqueue(nested.flat());
+    } else {
+      enqueue(Array.from(e.dataTransfer.files || [])
+        .map((file) => ({ file, path: file.name })));
+    }
+  });
+}
 
 /* -------------------------------------------------------------- duplicates */
 
@@ -678,6 +852,23 @@ async function refreshJobs() {
   let jobs = [];
   try { ({ jobs } = await api('jobs')); } catch { return; }
 
+  // Refresh on the *newest job's identity and state*, not on the progress bar
+  // becoming hidden. A job that starts and finishes between two polls never
+  // shows a bar, and the views would then silently never update.
+  const newest = jobs[0];
+  const signature = newest ? `${newest.id}:${newest.state}` : '';
+  if (signature !== state.lastJobSignature) {
+    const settled = newest && newest.state !== 'running';
+    state.lastJobSignature = signature;
+    if (settled) {
+      refreshStatus();
+      loadTimeline();
+      loadPhotos();
+      loadStaged();
+      if (state.view === 'duplicates') loadDuplicates();
+    }
+  }
+
   const active = jobs.find((j) => j.state === 'running');
   const bar = $('#jobBar');
   if (active) {
@@ -694,12 +885,8 @@ async function refreshJobs() {
       $('#jobPercent').textContent = `${active.percent}%`;
     }
     $('#jobCancel').dataset.id = active.id;
-  } else if (!bar.hidden) {
+  } else {
     bar.hidden = true;
-    refreshStatus();
-    loadTimeline();
-    loadPhotos();
-    if (state.view === 'duplicates') loadDuplicates();
   }
 
   if (state.view === 'activity') renderJobs(jobs);
@@ -760,6 +947,7 @@ function switchView(view) {
 function attach() {
   attachSettings();
   attachDuplicates();
+  attachUploads();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 
@@ -819,7 +1007,7 @@ function attach() {
 async function init() {
   attach();
   switchView('photos');
-  await Promise.all([refreshStatus(), loadTimeline(), loadPhotos()]);
+  await Promise.all([refreshStatus(), loadTimeline(), loadPhotos(), loadStaged()]);
   refreshJobs();
   // Poll rather than push: for a single-user local app this is a few bytes a
   // second and avoids a WebSocket's reconnection and lifecycle handling.

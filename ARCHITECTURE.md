@@ -548,3 +548,49 @@ Two further refusals, both about the user's intent rather than the data:
 
 > **The general lesson:** a destructive feature's design is mostly its refusals. The
 > deletion itself is three lines.
+
+
+---
+
+## Decision 14: uploads join the existing pipeline, not a new one
+
+Browser uploads land in a staging directory and are then fed through `ingest_source` —
+the same hashing, dedup, date extraction and replication as any folder on disk. There is
+no "uploaded photo" concept anywhere in the catalog.
+
+The temptation is to write a dedicated path: you already have the bytes in memory, you
+know the filename, just insert it. That path would then need its own dedup, its own date
+handling, its own replication trigger — and would drift from the real one the first time
+either changed. **A second way to get a photo into the library is a second set of bugs.**
+
+Staging deliberately sits *outside* the primary replica root. Anything under a replica
+root is enumerated by `list_present()`, so a staged file would be counted as stored
+content before it had been imported — the health report would claim protection for
+photos that exist in exactly one place.
+
+### The filename is the attack surface
+
+Everything else in PhotoVault reads paths it generated itself. This endpoint accepts a
+path from an HTTP client, and `../../../../.ssh/authorized_keys` is a perfectly valid
+thing for one to send.
+
+The defence is to **rebuild rather than clean**. Each component is reconstructed from
+`[A-Za-z0-9._-]`, so there is no sequence to smuggle through — blacklist-style stripping
+loses to `....//`, which becomes `../` precisely because the filter removed the middle.
+Traversal, absolute paths, UNC and drive-letter prefixes are refused outright rather than
+reinterpreted: a browser never produces them, so accepting one silently is how the next
+probe goes unnoticed. The resolved path is then checked to be inside staging anyway,
+because a guard you can only argue for is weaker than one you can also assert.
+
+Two implementation details that matter as much as the validation:
+
+- **Stream to disk, never buffer.** Content-Length is read in 1 MB chunks. Otherwise a
+  single upload decides how much memory the server uses.
+- **A short read is a failure, not a file.** If fewer bytes arrive than were promised,
+  the partial file is deleted. A half-received photo hashes as a different, perfectly
+  valid-looking asset — which PhotoVault would then faithfully replicate to every drive.
+
+> **The general lesson:** when a boundary starts accepting input from somewhere new, the
+> question is not "is this input valid?" but "what is the smallest set of shapes I can
+> reconstruct it into?" Validation you can enumerate beats validation you have to
+> anticipate.

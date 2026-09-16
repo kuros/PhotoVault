@@ -461,3 +461,24 @@ button { font: inherit; cursor: pointer; }
 .dupitem__meta b { display: block; font-size: 12px; }
 .dupitem__meta span { color: var(--muted); }
 .dupitem__warn { color: var(--bad); font-weight: 600; }
+
+/* ----------------------------------------------------------------- uploads */
+
+.dropzone {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(79, 70, 229, .14); backdrop-filter: blur(3px);
+  border: 3px dashed var(--accent); border-radius: 6px;
+  pointer-events: none;
+}
+.dropzone__card {
+  display: flex; flex-direction: column; gap: 6px; align-items: center;
+  padding: 26px 34px; border-radius: var(--radius);
+  background: var(--surface); box-shadow: 0 12px 40px rgba(0,0,0,.22);
+  text-align: center;
+}
+.dropzone__card strong { font-size: 15px; }
+.dropzone__card span { font-size: 12.5px; color: var(--muted); }
+
+#uploadErrors { margin-top: 10px; max-height: 150px; overflow-y: auto; }
+#uploadErrors li { font-size: 11.5px; color: var(--bad); border-bottom: 0; padding: 2px 0; }

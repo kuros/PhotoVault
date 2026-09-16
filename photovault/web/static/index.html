@@ -64,6 +64,7 @@
       <div class="viewbar">
         <h2 id="gridTitle">All photos</h2>
         <div class="viewbar__right">
+          <button id="addPhotos" class="btn btn--sm btn--primary">Add photos</button>
           <div class="segmented" id="kindFilter">
             <button class="is-active" data-kind="">All</button>
             <button data-kind="image">Photos</button>
@@ -72,6 +73,31 @@
           <span id="gridCount" class="muted"></span>
         </div>
       </div>
+      <div id="uploadPanel" class="panel panel--card" hidden>
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">Uploading</h3>
+            <p class="muted panel__sub" id="uploadNote"></p>
+          </div>
+          <button id="uploadCancel" class="btn btn--sm btn--ghost">Cancel</button>
+        </div>
+        <div class="progress"><div id="uploadFill" class="progress__fill"></div></div>
+        <ul id="uploadErrors" class="events"></ul>
+      </div>
+
+      <div id="stagedPanel" class="panel panel--card" hidden>
+        <div class="panel__head">
+          <div>
+            <h3 class="panel__title">Waiting to be imported</h3>
+            <p class="muted panel__sub" id="stagedNote"></p>
+          </div>
+          <span class="dupgroup__actions">
+            <button id="stagedImport" class="btn btn--sm btn--primary">Import them</button>
+            <button id="stagedDiscard" class="btn btn--sm btn--ghost">Discard</button>
+          </span>
+        </div>
+      </div>
+
       <div id="grid" class="grid"></div>
       <div id="gridEmpty" class="empty" hidden></div>
       <button id="loadMore" class="btn btn--wide" hidden>Load more</button>
@@ -210,6 +236,16 @@
     <h4>Imported from</h4>
     <ul id="viewerSources" class="sources"></ul>
   </aside>
+</div>
+
+<input id="filePicker" type="file" multiple accept="image/*,video/*" hidden>
+<input id="folderPicker" type="file" multiple webkitdirectory hidden>
+
+<div id="dropzone" class="dropzone" hidden>
+  <div class="dropzone__card">
+    <strong>Drop photos or folders to add them</strong>
+    <span>Sub-folders are included. Anything already in your library is skipped.</span>
+  </div>
 </div>
 
 <div id="toast" class="toast" hidden></div>

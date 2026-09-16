@@ -428,6 +428,45 @@ isn't worth it for a monthly task.
 
 ---
 
+## Adding photos from the browser
+
+For consolidating old folders — a drive full of scans, an exported album — without
+wiring them up as a permanent source.
+
+```bash
+python3 -m photovault ui     # → Photos → Add photos
+```
+
+Pick a folder (sub-folders included) or drop one anywhere on the window. Files upload,
+land in a staging area, and a **Waiting to be imported** panel appears with
+`Import them` / `Discard`. Importing runs the ordinary pipeline: hash, dedup, date from
+EXIF, replicate to every device, then clear staging.
+
+Nothing special happens to an uploaded photo — a second import path would be a second
+set of bugs, so there is only one. Re-upload a folder you already imported and it
+reports `0 imported, N already in the library`.
+
+**Staging is emptied only after replication.** It holds the only copy of a
+just-uploaded photo until the replicas have it, so it is cleared on the same evidence
+bar as everything else: `min_copies` copies, re-read and re-hashed.
+
+### On filenames
+
+The relative path of each file comes from the browser, and an HTTP client can claim any
+path it likes. Every component is **rebuilt from a safe character set** rather than
+cleaned — sanitising by removal is a game you lose to inputs like `....//`. Traversal,
+absolute paths, UNC and drive-letter prefixes, and null bytes are refused outright; a
+browser never sends them, so they are only ever a probe. Windows reserved names
+(`CON`, `LPT1`) are escaped, and the resolved path is checked to be inside staging
+before a byte is written.
+
+Files stream to disk rather than being buffered, so a 500 MB video does not become
+500 MB of server memory. A truncated upload is discarded rather than left as a partial
+file — a half-received photo hashes as a different, corrupt asset, and PhotoVault would
+then faithfully replicate that corruption everywhere.
+
+---
+
 ## Removing duplicate photos
 
 Byte-identical copies never need removing — content addressing collapses them at import,
@@ -741,9 +780,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-107 tests covering ingest, deduplication, replication, corruption repair, catalog
+132 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, and duplicate review.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, and upload path safety.
 
 ---
 

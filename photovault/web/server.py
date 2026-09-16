@@ -20,10 +20,10 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import config as configmod
-from .. import duplicates
+from .. import duplicates, uploads
 from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
@@ -105,6 +105,12 @@ class VaultHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
+
+        # Uploads carry raw bytes, not JSON, and must be streamed to disk -
+        # reading a 500 MB video into memory to parse it would be absurd.
+        if url.path == "/api/upload":
+            return self._accept_upload()
+
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -122,6 +128,8 @@ class VaultHandler(BaseHTTPRequestHandler):
                 return self._json({"cleared": thumbs.clear_cache()})
             if url.path == "/api/config":
                 return self._save_config(body)
+            if url.path == "/api/uploads/discard":
+                return self._json({"discarded": uploads.discard(self.cfg)})
             if url.path == "/api/duplicates/decide":
                 decisions = body.get("decisions")
                 if not isinstance(decisions, dict):
@@ -181,6 +189,14 @@ class VaultHandler(BaseHTTPRequestHandler):
                 "shard_copies_needed": p.shard_copies_needed,
                 "unplaceable": len(p.unplaceable),
                 "replicas": [{"name": n, **s} for n, s in p.per_replica.items()],
+            })
+
+        if name == "uploads":
+            summary = uploads.staged(self.cfg)
+            return self._json({
+                "files": summary.files, "bytes": summary.bytes,
+                "samples": summary.samples,
+                "staging": str(uploads.staging_dir(self.cfg)),
             })
 
         if name == "duplicates":
@@ -293,6 +309,35 @@ class VaultHandler(BaseHTTPRequestHandler):
                 dict(e) for e in cat.recent_events(int(q.get("limit", 40)))]})
 
         return self._json({"error": "not found"}, 404)
+
+    def _accept_upload(self):
+        """Stream one uploaded file into staging.
+
+        The relative path arrives in a header rather than the URL so that
+        spaces, slashes and non-ASCII names survive intact; it is treated as
+        hostile input and rebuilt, never merely cleaned.
+        """
+        raw_path = self.headers.get("X-PV-Path", "")
+        try:
+            raw_path = unquote(raw_path)
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json({"error": "bad headers"}, 400)
+        if length <= 0:
+            return self._json({"error": "empty upload"}, 400)
+
+        result = uploads.accept(self.cfg, raw_path, self.rfile, length)
+        if not result.stored:
+            # Drain whatever is left so the connection stays usable.
+            remaining = length
+            while remaining > 0:
+                block = self.rfile.read(min(65536, remaining))
+                if not block:
+                    break
+                remaining -= len(block)
+            return self._json({"error": result.reason, "path": raw_path}, 400)
+        return self._json({"stored": True, "path": result.path,
+                           "size": result.size})
 
     def _save_config(self, body: dict):
         """Validate and persist a config edited in the UI.

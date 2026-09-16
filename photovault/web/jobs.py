@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import duplicates, ingest, sync, verify
+from .. import duplicates, ingest, sync, uploads, verify
 from ..catalog import Catalog
 from ..config import Config
 
@@ -248,12 +248,54 @@ class JobRunner:
         job.message = f"deleted {rep.deleted}, kept {len(rep.refused)} as unsafe"
 
 
+    def _run_upload_ingest(self, job: Job, cat: Catalog,
+                           clear: bool = True) -> None:
+        """Import what the browser staged, replicate it, then clear staging.
+
+        Clearing happens last and on the same evidence bar as everything else:
+        staging holds the only copy of a just-uploaded photo until replication
+        has actually happened, so it is emptied only for files that reach
+        min_copies verified copies.
+        """
+        def progress(st):
+            job.done = st.scanned
+            job.message = f"{st.scanned} scanned, {st.imported} imported"
+
+        job.message = "importing uploaded photos"
+        st = uploads.ingest_staged(self.cfg, cat, progress=progress)
+        job.errors.extend(st.errors[:10])
+
+        replicated = 0
+        for spec in self.cfg.replicas:
+            if spec.name == self.cfg.primary:
+                continue
+            job.message = f"backing up to {spec.name}"
+            try:
+                replicated += sync.push(self.cfg, cat, spec.name).copied
+            except Exception as exc:
+                if not spec.offline:
+                    job.errors.append(f"{spec.name}: {exc}")
+
+        cleared, notes = (0, [])
+        if clear:
+            job.message = "clearing staged files that are safely stored"
+            cleared, notes = uploads.clear_imported(self.cfg, cat)
+            job.errors.extend(notes)
+
+        job.result = {"imported": st.imported, "duplicates": st.duplicates,
+                      "failed": st.failed, "replicated": replicated,
+                      "cleared": cleared}
+        job.message = (f"imported {st.imported}, "
+                       f"{st.duplicates} already in the library")
+
+
 def _label(action: str, kwargs: dict) -> str:
     target = kwargs.get("replica") or kwargs.get("device")
     base = {"ingest": "Import photos", "sync": "Back up",
             "scrub": "Verify integrity", "reconcile": "Re-check devices",
             "dupscan": "Find duplicates",
-            "dupapply": "Delete reviewed duplicates"}.get(action, action)
+            "dupapply": "Delete reviewed duplicates",
+            "upload_ingest": "Import uploaded photos"}.get(action, action)
     if kwargs.get("force"):
         base += " (full)"
     if kwargs.get("dry_run"):

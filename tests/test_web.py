@@ -287,3 +287,64 @@ class TestConfigApi(WebTestCase):
         for d in body["drives"]:
             self.assertIn("free", d)
             self.assertIn("path", d)
+
+
+class TestUploadApi(WebTestCase):
+    """The upload route takes raw bytes with a caller-supplied path. It is the
+    only endpoint where an attacker controls where something lands."""
+
+    def upload(self, rel_path: str, payload: bytes):
+        from urllib.parse import quote
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/upload", data=payload,
+            headers={"X-PV-Path": quote(rel_path),
+                     "Content-Type": "application/octet-stream"}, method="POST")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+
+    def photo(self, tag: str = "a") -> bytes:
+        from make_fixtures import jpeg_with_exif
+        return jpeg_with_exif("2023:08:14 11:00:00", tag.encode() * 200)
+
+    def test_a_photo_can_be_uploaded_and_listed(self):
+        res = self.upload("trip/IMG_1.jpg", self.photo("x"))
+        self.assertTrue(res["stored"])
+        staged = self.get("/api/uploads")
+        self.assertEqual(staged["files"], 1)
+        self.assertGreater(staged["bytes"], 0)
+
+    def test_traversal_is_rejected_over_http(self):
+        for attack in ("../../../../tmp/pwned.jpg", "/etc/cron.d/x.jpg",
+                       "C:\\evil.jpg"):
+            with self.subTest(attack=attack):
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    self.upload(attack, self.photo("y"))
+                self.assertEqual(cm.exception.code, 400)
+        self.assertEqual(self.get("/api/uploads")["files"], 0)
+        self.assertFalse(Path("/tmp/pwned.jpg").exists())
+
+    def test_non_media_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.upload("notes.txt", b"hello")
+        self.assertEqual(cm.exception.code, 400)
+
+    def test_upload_then_import_reaches_full_redundancy(self):
+        for i in range(3):
+            self.upload(f"scans/IMG_{i}.jpg", self.photo(f"s{i}"))
+        before = self.get("/api/status")["total_assets"]
+
+        self.post("/api/jobs", {"action": "upload_ingest"})
+        self.wait_idle()
+        job = self.get("/api/jobs")["jobs"][0]
+        self.assertEqual(job["state"], "done")
+        self.assertEqual(job["result"]["imported"], 3)
+
+        self.assertEqual(self.get("/api/status")["total_assets"], before + 3)
+        # Staging empties only once the photos are verifiably replicated.
+        self.assertEqual(self.get("/api/uploads")["files"], 0)
+
+    def test_discard_throws_staged_files_away(self):
+        self.upload("a/IMG_1.jpg", self.photo("z"))
+        res = self.post("/api/uploads/discard", {})
+        self.assertEqual(res["discarded"], 1)
+        self.assertEqual(self.get("/api/uploads")["files"], 0)
