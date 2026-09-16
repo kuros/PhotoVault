@@ -316,6 +316,15 @@ def cmd_rebuild(args) -> int:
     return 0
 
 
+def cmd_ui(args) -> int:
+    """Serve the local web interface."""
+    from .web.server import serve
+    cfg, cat = _load(args)
+    cat.close()  # the server opens its own per-thread connections
+    serve(cfg, host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -381,6 +390,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="recover a lost catalog by re-reading a replica")
     s.add_argument("replica")
     s.set_defaults(func=cmd_rebuild)
+
+    s = sub.add_parser("ui", help="open the web interface in your browser")
+    s.add_argument("--port", type=int, default=8723)
+    s.add_argument("--host", default="127.0.0.1",
+                   help="default 127.0.0.1 - this Mac only. Changing this "
+                        "exposes your library to the network with no password.")
+    s.add_argument("--no-browser", action="store_true")
+    s.set_defaults(func=cmd_ui)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

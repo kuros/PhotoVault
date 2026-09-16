@@ -204,3 +204,68 @@ class Catalog:
         return self.db.execute(
             "SELECT * FROM event ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
+
+    # --------------------------------------------------------------- browsing
+
+    def timeline(self):
+        """Photo counts per year and month, for the browser's date sidebar."""
+        return self.db.execute(
+            """SELECT substr(captured_at, 1, 4) AS year,
+                      substr(captured_at, 6, 2) AS month,
+                      COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes
+               FROM asset
+               WHERE captured_at IS NOT NULL
+               GROUP BY year, month
+               ORDER BY year DESC, month DESC"""
+        ).fetchall()
+
+    def undated_count(self) -> int:
+        return self.db.execute(
+            "SELECT COUNT(*) n FROM asset WHERE captured_at IS NULL"
+        ).fetchone()["n"]
+
+    def browse(self, *, year=None, month=None, kind=None, undated=False,
+               limit=200, offset=0):
+        """A page of assets, newest first, with their live copy count."""
+        where, params = [], []
+        if undated:
+            where.append("a.captured_at IS NULL")
+        else:
+            if year:
+                where.append("substr(a.captured_at, 1, 4) = ?")
+                params.append(str(year))
+            if month:
+                where.append("substr(a.captured_at, 6, 2) = ?")
+                params.append(f"{int(month):02d}")
+        if kind:
+            where.append("a.media_kind = ?")
+            params.append(kind)
+        clause = ("WHERE " + " AND ".join(where)) if where else ""
+
+        rows = self.db.execute(
+            f"""SELECT a.*,
+                       (SELECT COUNT(*) FROM placement p
+                        WHERE p.hash = a.hash AND p.state = 'present') AS copies,
+                       (SELECT COUNT(*) FROM placement p
+                        WHERE p.hash = a.hash AND p.state = 'corrupt') AS bad
+                FROM asset a {clause}
+                ORDER BY a.captured_at DESC, a.rel_path DESC
+                LIMIT ? OFFSET ?""",
+            (*params, limit, offset),
+        ).fetchall()
+        total = self.db.execute(
+            f"SELECT COUNT(*) n FROM asset a {clause}", tuple(params)
+        ).fetchone()["n"]
+        return rows, total
+
+    def asset_detail(self, hash_: str):
+        asset = self.asset(hash_)
+        if not asset:
+            return None
+        return {
+            "asset": dict(asset),
+            "placements": [dict(p) for p in self.placements(hash_)],
+            "sources": [dict(s) for s in self.db.execute(
+                "SELECT device, abs_path, seen_at FROM source_file WHERE hash = ?",
+                (hash_,)).fetchall()],
+        }

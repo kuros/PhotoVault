@@ -62,9 +62,55 @@ python3 -m photovault status      # am I actually protected?
 | `restore <folder>` | Rebuild a complete library into a fresh folder |
 | `replicas` | Which devices are configured and reachable right now |
 | `log` | Recent operations |
+| `ui` | Open the web interface in your browser |
 
 Every command is safe to run twice. That property is called **idempotency**, and it's
 why you can wire these into a schedule without worrying about double-imports.
+
+---
+
+## The web interface
+
+```bash
+python3 -m photovault ui
+```
+
+Opens `http://127.0.0.1:8723` in your browser. Three tabs:
+
+- **Photos** — your library as a grid, with a year/month sidebar. Click any photo to
+  see when it was taken, which devices hold it, and where it was imported from.
+- **Health** — the four protection checks, a redundancy bar, and a per-device table.
+- **Activity** — running and past operations, with live progress and any errors.
+
+The **Import**, **Back up** and **Verify** buttons run the same operations as the CLI
+commands, in the background, with a progress bar. They're disabled while something is
+already running.
+
+### It only listens to this Mac
+
+The server binds to `127.0.0.1` — the loopback address, which only this machine can
+reach. **Don't change that casually.** These endpoints can copy, overwrite and delete
+files, and there's no password. Binding to `0.0.0.0` would hand anyone on your network
+— or the coffee shop wifi — full control of your photo library.
+
+There's a `--host` flag, and it prints a warning when you use it. If you genuinely want
+the UI from your iPad, the safe route is an SSH tunnel, which keeps the server on
+loopback and authenticates you properly:
+
+```bash
+ssh -L 8723:127.0.0.1:8723 you@your-mac
+```
+
+### Thumbnails
+
+Full photos are 3–10 MB each; a grid of them would be a gigabyte of downloads to show
+postage stamps. PhotoVault generates small copies once and caches them under
+`~/.cache/photovault/thumbs`, keyed by content hash — so a cached thumbnail can never
+go stale, because different bytes mean a different key.
+
+It uses whichever tool it finds: **Pillow** (`pip install Pillow`, fastest and works
+everywhere), **sips** (built into macOS, used automatically), or **ffmpeg** for video
+poster frames. Files it can't thumbnail show their file type instead of a broken image.
 
 ---
 
@@ -241,13 +287,16 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-19 tests covering ingest, deduplication, replication, corruption repair, catalog
-rebuild, and total loss of the primary device.
+35 tests covering ingest, deduplication, replication, corruption repair, catalog
+rebuild, total loss of the primary device, the HTTP API, background jobs, and
+path-traversal defence.
 
 ---
 
 ## Requirements
 
-Python 3.11+ and `rsync` (both already on macOS). No other dependencies. Optionally
+Python 3.11+ and `rsync` (both already on macOS). No other dependencies — the web
+UI is plain HTML, CSS and JavaScript served by Python's standard library, with no
+build step and nothing to install. Optionally
 `pip install blake3` for roughly 5x faster hashing on large libraries — PhotoVault
 detects it automatically.

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PhotoVault</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗄️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <h1>PhotoVault</h1>
+  </div>
+
+  <div id="healthPill" class="pill pill--idle">
+    <span class="dot"></span><span id="healthText">checking…</span>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-view="photos" role="tab">Photos</button>
+    <button class="tab" data-view="health" role="tab">Health</button>
+    <button class="tab" data-view="activity" role="tab">Activity</button>
+  </nav>
+
+  <div class="actions">
+    <button class="btn" data-action="ingest">Import</button>
+    <button class="btn" data-action="sync">Back up</button>
+    <button class="btn" data-action="scrub">Verify</button>
+  </div>
+</header>
+
+<div id="jobBar" class="jobbar" hidden>
+  <div class="jobbar__info">
+    <strong id="jobLabel"></strong>
+    <span id="jobMessage" class="muted"></span>
+  </div>
+  <div class="progress"><div id="jobFill" class="progress__fill"></div></div>
+  <span id="jobPercent" class="jobbar__pct"></span>
+  <button id="jobCancel" class="btn btn--ghost btn--sm">Cancel</button>
+</div>
+
+<main class="layout">
+
+  <aside class="sidebar">
+    <section class="panel">
+      <h2 class="panel__title">Devices</h2>
+      <ul id="deviceList" class="devices"></ul>
+    </section>
+    <section class="panel panel--grow">
+      <h2 class="panel__title">Library</h2>
+      <ul id="timeline" class="timeline"></ul>
+    </section>
+  </aside>
+
+  <section class="content">
+
+    <!-- PHOTOS -->
+    <div class="view is-active" data-view="photos">
+      <div class="viewbar">
+        <h2 id="gridTitle">All photos</h2>
+        <div class="viewbar__right">
+          <div class="segmented" id="kindFilter">
+            <button class="is-active" data-kind="">All</button>
+            <button data-kind="image">Photos</button>
+            <button data-kind="video">Videos</button>
+          </div>
+          <span id="gridCount" class="muted"></span>
+        </div>
+      </div>
+      <div id="grid" class="grid"></div>
+      <div id="gridEmpty" class="empty" hidden></div>
+      <button id="loadMore" class="btn btn--wide" hidden>Load more</button>
+    </div>
+
+    <!-- HEALTH -->
+    <div class="view" data-view="health">
+      <div class="viewbar"><h2>Protection status</h2></div>
+      <div id="checks" class="checks"></div>
+      <div class="panel panel--card">
+        <h3 class="panel__title">Redundancy</h3>
+        <p class="muted panel__sub">How many devices hold each photo.</p>
+        <div id="histogram" class="histogram"></div>
+      </div>
+      <div class="panel panel--card">
+        <h3 class="panel__title">Devices</h3>
+        <div class="tablewrap"><table id="replicaTable" class="table"></table></div>
+      </div>
+    </div>
+
+    <!-- ACTIVITY -->
+    <div class="view" data-view="activity">
+      <div class="viewbar"><h2>Activity</h2></div>
+      <div class="panel panel--card">
+        <h3 class="panel__title">Operations</h3>
+        <ul id="jobList" class="joblist"></ul>
+      </div>
+      <div class="panel panel--card">
+        <h3 class="panel__title">History</h3>
+        <ul id="eventList" class="events"></ul>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<!-- PHOTO DETAIL -->
+<div id="viewer" class="viewer" hidden>
+  <button id="viewerClose" class="viewer__close" aria-label="Close">&times;</button>
+  <button id="viewerPrev" class="viewer__nav viewer__nav--prev" aria-label="Previous">&#8249;</button>
+  <button id="viewerNext" class="viewer__nav viewer__nav--next" aria-label="Next">&#8250;</button>
+  <figure class="viewer__stage"><img id="viewerImg" alt=""></figure>
+  <aside class="viewer__meta">
+    <h3 id="viewerName"></h3>
+    <dl id="viewerFacts" class="facts"></dl>
+    <h4>Stored on</h4>
+    <ul id="viewerCopies" class="copies"></ul>
+    <h4>Imported from</h4>
+    <ul id="viewerSources" class="sources"></ul>
+  </aside>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

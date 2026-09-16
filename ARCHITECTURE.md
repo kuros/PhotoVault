@@ -229,3 +229,72 @@ written.
   it for drives that never leave your house.
 
 Knowing what you're *not* building, and being able to say why, is part of the design.
+
+---
+
+## Decision 7: the UI is a client of the same core
+
+`cli.py` contains no business logic — check it yourself:
+
+```bash
+grep -cE 'hash_file|rglob|\.put\(|sqlite3' photovault/cli.py   # 0
+```
+
+That discipline is what made the web UI cheap. `photovault/web/server.py` calls the
+exact same `ingest`, `sync`, `verify` and `health` modules the CLI calls. There is no
+duplicated logic, so the two interfaces cannot drift apart or disagree about whether
+your photos are safe.
+
+If instead the ingest logic had been written *inside* the CLI command — which is the
+path of least resistance — the UI would have meant either rewriting it or refactoring
+first. **The layering wasn't extra work done for its own sake; it was the thing that
+made the second interface a few hundred lines instead of a rewrite.**
+
+### Jobs run in the background, and the browser polls
+
+Importing 400 GB takes hours. An HTTP request that waits for it would time out, so
+`POST /api/jobs` *starts* work and returns immediately; the browser polls
+`GET /api/jobs` once a second for progress.
+
+Polling gets criticised versus WebSockets, but for one user on localhost it's a few
+bytes a second, and it removes an entire category of work: reconnection, backpressure,
+and connection lifecycle. *Choose the boring mechanism until measurement says you
+can't.*
+
+Two concurrency rules keep it safe:
+
+- **One mutating job at a time.** The work is disk-bound, so running ingest and sync
+  together would contend for the same catalog rows with no speedup.
+- **Every thread opens its own SQLite connection.** Connections belong to the thread
+  that created them; sharing one across threads produces intermittent corruption that
+  is miserable to debug. Thread-confinement costs nothing and deletes the whole
+  problem class.
+
+### Binding to loopback is a security decision, not a default
+
+The server listens on `127.0.0.1`. It has no authentication and its endpoints can copy,
+overwrite and delete files — so `0.0.0.0` would expose the library to everyone on the
+network. The `--host` flag exists and prints a warning, because the right answer to
+"I want this on my iPad" is an SSH tunnel, not an open port.
+
+Static file serving normalises the request path and confirms the resolved file is
+actually inside the static directory, so `/static/../../../etc/passwd` returns 404.
+There is a test for it, including URL-encoded variants.
+
+### Three bugs the browser caught that reading the code did not
+
+Worth recording, because all three are invisible until you look at the rendered page:
+
+1. **The photo viewer was open on page load.** `<div hidden>` is defeated by any author
+   rule setting `display` — `[hidden]` is only a user-agent style, and author styles
+   win. Fix: `[hidden] { display: none !important; }`.
+2. **Thumbnails loaded but were invisible**, covered by the absolutely-positioned
+   fallback label meant to show only when there's no image. Fix: hide the fallback once
+   the image decodes.
+3. **The redundancy bar rendered as nothing.** It was a `<span>`, and inline elements
+   ignore `width` and `height` entirely. The tell was `getComputedStyle().width`
+   returning the literal string `"100%"` instead of a pixel value — a laid-out element
+   always resolves to pixels. Fix: `display: block`.
+
+> **The general lesson:** code that produces a visual result cannot be verified by
+> reading it. Run it and look.

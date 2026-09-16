@@ -176,3 +176,9 @@ def rebuild_from(cfg: Config, catalog: Catalog, name: str, *, progress=None) -> 
 
     catalog.log("rebuild", f"{name}: recovered {found} assets")
     return found
+
+
+def local_copy(cfg: Config, catalog: Catalog, hash_: str, rel_path: str) -> Path | None:
+    """Any locally readable copy of an asset, primary preferred. Used to serve
+    and thumbnail photos without caring which device they came from."""
+    return _local_source(cfg, catalog, hash_, rel_path, exclude="")
