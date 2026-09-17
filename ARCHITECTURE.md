@@ -884,3 +884,38 @@ cost you the backup of the thing that cannot be regenerated.
 One check worth keeping: a dump not ending in PostgreSQL's completion marker is flagged
 as suspect. A truncated dump restores as a silently partial database, which is a worse
 outcome than no dump at all.
+
+
+---
+
+## Decision 21: one import path, or the interfaces drift
+
+Adding `immich` as a source kind touched `importer.run_import`, which the CLI calls. The
+web UI's Import button did not use it — `jobs.py` had grown its own loop, written back
+when every source was a folder:
+
+```python
+root = Path(src.path).expanduser()
+if not root.exists():
+    job.errors.append(f"{src.device}: {root} does not exist")
+```
+
+So the UI reported `http:/localhost:2283 does not exist` for a correctly configured
+Immich source, while the CLI imported from it perfectly. The single slash is `pathlib`
+collapsing `//` — a detail that made the message actively misleading, since it looked
+like a typo in the user's URL rather than a feature the UI had never learned.
+
+The fix was to delete the second implementation, not to teach it about Immich.
+
+> **The general lesson:** [Decision 17](#decision-17-the-operation-describes-itself) put
+> the *descriptions* in one place so the UI and CLI could not disagree about what an
+> operation means. This is the same failure one level down: they also have to share the
+> *implementation*, or a feature added to one silently does not exist in the other. Two
+> code paths for the same user-facing verb is a bug with a delay on it.
+
+Two guards now catch the configuration that produced it:
+
+- A `local` source whose path contains `://` is rejected at save with a message naming
+  the fix, rather than failing later as a missing directory.
+- An `immich` source drops any leftover `path` — that value is only ever what someone
+  typed before switching the kind.

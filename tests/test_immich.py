@@ -468,3 +468,65 @@ class TestBackupReplication(ImmichTestCase):
         self.assertEqual(len(list(root.glob("catalog-*.db.gz"))), 2)
         self.assertEqual(len(list(root.glob("immich-db-*.sql.gz"))), 2)
         self.assertEqual(len(list(root.glob("immich-albums-*.json"))), 2)
+
+
+class TestUiImportPath(ImmichTestCase):
+    """The UI's Import job and the CLI's import must be the same code.
+
+    They were not: the job did Path(src.path) unconditionally, so an immich
+    source produced "http:/localhost:2283 does not exist" — Path having
+    collapsed the double slash — while the CLI imported fine.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from photovault.web.jobs import JobRunner
+        self.runner = JobRunner(self.cfg)
+
+    def wait(self):
+        import time
+        for _ in range(200):
+            jobs = self.runner.list()
+            if jobs and jobs[0]["state"] != "running":
+                return jobs[0]
+            time.sleep(0.05)
+        self.fail("job did not finish")
+
+    def test_the_ui_job_imports_from_an_immich_source(self):
+        for n in range(1, 4):
+            self.add_asset(n)
+        self.runner.start("ingest")
+        job = self.wait()
+        self.assertEqual(job["state"], "done", job["errors"])
+        self.assertEqual(job["result"]["imported"], 3)
+        self.assertEqual(len(list((self.tmp / "mac").rglob("*.jpg"))), 3)
+
+    def test_the_ui_job_replicates_and_releases_like_the_cli(self):
+        ids = [self.add_asset(n) for n in range(1, 4)]
+        self.runner.start("ingest")
+        job = self.wait()
+        self.assertEqual(job["result"]["replicated"], 3)
+        self.assertEqual(job["result"]["released"], 3)
+        self.assertEqual(sorted(StubImmich.deleted), sorted(ids))
+
+    def test_a_url_in_a_local_source_path_is_rejected_at_save(self):
+        """The mistake that produced the original error: a URL typed into the
+        path field of a folder source."""
+        from photovault import config as configmod
+
+        data = configmod.to_dict(self.cfg)
+        data["source"] = [{"device": "photos", "kind": "local",
+                           "path": "http://localhost:2283"}]
+        with self.assertRaises(ValueError) as cm:
+            configmod.save(data, self.tmp / "bad.toml")
+        self.assertIn("URL in its path", str(cm.exception))
+
+    def test_a_stray_path_on_an_immich_source_is_dropped(self):
+        from photovault import config as configmod
+
+        data = configmod.to_dict(self.cfg)
+        data["source"] = [{"device": "photos", "kind": "immich",
+                           "url": self.url, "api_key": API_KEY,
+                           "path": "http://localhost:2283/"}]
+        cfg = configmod.save(data, self.tmp / "ok.toml")
+        self.assertEqual(cfg.sources[0].path, "")

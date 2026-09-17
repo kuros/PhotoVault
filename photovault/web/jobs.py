@@ -133,33 +133,41 @@ class JobRunner:
 
     def _run_ingest(self, job: Job, cat: Catalog, device: str | None = None,
                     dry_run: bool = False) -> None:
+        """Import from every configured source.
+
+        Delegates to importer.run_import, which is what the CLI uses. The UI
+        used to have its own loop that did Path(src.path) unconditionally, so
+        it silently could not handle `immich` or `adb` sources at all - it
+        reported "does not exist" for a URL. Two import paths meant two sets of
+        supported source kinds, which is exactly the drift a shared function
+        prevents.
+        """
+        from .. import importer
+
         sources = [s for s in self.cfg.sources if not device or s.device == device]
         if not sources:
             raise ValueError("no matching sources are configured")
 
-        totals = {"imported": 0, "duplicates": 0, "skipped": 0,
-                  "failed": 0, "bytes": 0}
+        totals = {"imported": 0, "duplicates": 0, "replicated": 0,
+                  "released": 0, "failed": 0}
         for src in sources:
             if job._cancel.is_set():
                 break
-            root = Path(src.path).expanduser()
-            job.message = f"scanning {src.device}"
-            if not root.exists():
-                job.errors.append(f"{src.device}: {root} does not exist")
-                continue
+            job.message = f"importing from {src.device}"
 
-            def progress(st, _dev=src.device):
-                job.done = st.scanned
-                job.message = f"{_dev}: {st.scanned} scanned, {st.imported} imported"
+            def report(text, _dev=src.device):
+                job.message = f"{_dev}: {text.strip()}"
 
-            st = ingest.ingest_source(self.cfg, cat, src.device, root,
-                                      dry_run=dry_run, progress=progress)
-            totals["imported"] += st.imported
-            totals["duplicates"] += st.duplicates
-            totals["skipped"] += st.skipped
-            totals["failed"] += st.failed
-            totals["bytes"] += st.bytes_imported
-            job.errors.extend(st.errors[:10])
+            rep = importer.run_import(self.cfg, cat, src, reclaim=False,
+                                      report_fn=report)
+            totals["imported"] += rep.imported
+            totals["duplicates"] += rep.duplicates
+            totals["replicated"] += sum(rep.replicated.values())
+            if rep.immich:
+                totals["released"] += rep.immich.released
+            job.errors.extend(f"{src.device}: {e}" for e in rep.errors[:5])
+            for name in rep.unreachable:
+                job.errors.append(f"{src.device}: {name} not connected")
 
         job.result = totals
         job.message = (f"imported {totals['imported']}, "

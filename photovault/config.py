@@ -134,10 +134,22 @@ def load(path: Path | None = None) -> Config:
     for r in cfg.replicas:
         pass
     for src in cfg.sources:
-        if src.kind == "immich" and not src.url:
-            raise ValueError(f"source {src.device!r} is kind=immich but has no url")
-        if src.kind in ("local", "adb") and not src.path:
-            raise ValueError(f"source {src.device!r} has no path")
+        if src.kind == "immich":
+            if not src.url:
+                raise ValueError(
+                    f"source {src.device!r} is kind=immich but has no url")
+            # A leftover path on an immich source is harmless but confusing:
+            # it is what someone typed before switching the kind.
+            src.path = ""
+        else:
+            if not src.path:
+                raise ValueError(f"source {src.device!r} has no path")
+            # Catching this here turns a baffling "http:/localhost does not
+            # exist" (Path collapses the double slash) into a clear message.
+            if "://" in src.path:
+                raise ValueError(
+                    f"source {src.device!r} has a URL in its path. Set "
+                    f"kind = \"immich\" and put it in `url` instead.")
     for r in cfg.replicas:
         if r.mode not in ("full", "shard"):
             raise ValueError(f"replica {r.name!r}: mode must be 'full' or 'shard'")

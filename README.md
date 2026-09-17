@@ -933,7 +933,7 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-199 tests covering ingest, deduplication, replication, corruption repair, catalog
+203 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
 path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, catalog backup and restore, the operations catalogue, the Immich integration against a stub server, and Immich backup artifacts.
 
