@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from . import (__version__, backups, config, duplicates, health, importer,
-               ingest, placement, sync, trash, verify)
+               ingest, placement, redate, sync, trash, verify)
 from .catalog import Catalog
 from .identity import IdentityMismatch, adopt, staleness
 from .replicas import ReplicaError, driver_for
@@ -967,6 +967,46 @@ def cmd_backup(args) -> int:
     return 0
 
 
+def cmd_redate(args) -> int:
+    """Re-read capture dates from the files and move anything filed wrongly."""
+    cfg, cat = _load(args)
+    rep = redate.find(cfg, cat, limit=args.limit)
+    if rep.blocked_by:
+        print(f"{RED}{', '.join(rep.blocked_by)} not connected{RESET}")
+        cat.close()
+        return 1
+
+    print(f"Examined {rep.examined:,} photos whose date was a guess "
+          f"(mtime or filename).")
+    if not rep.candidates:
+        print(f"{GREEN}Nothing to correct.{RESET}")
+        cat.close()
+        return 0
+
+    print(f"{YELLOW}{len(rep.candidates):,} have a real date in the file "
+          f"itself:{RESET}\n")
+    for c in rep.candidates[:args.show]:
+        print(f"  {str(c.old_when)[:10]} -> {c.new_when:%Y-%m-%d}  "
+              f"{DIM}({c.source}){RESET}  {c.old_path}")
+    if len(rep.candidates) > args.show:
+        print(f"  {DIM}...and {len(rep.candidates) - args.show:,} more{RESET}")
+
+    rep = redate.apply(cfg, cat, rep, dry_run=not args.apply)
+    if rep.blocked_by:
+        print(f"\n{RED}Every device must be connected to move files: "
+              f"{', '.join(rep.blocked_by)} missing.{RESET}")
+        cat.close()
+        return 1
+    if not args.apply:
+        print(f"\n{DIM}This was a preview. Re-run with --apply to move them.{RESET}")
+    else:
+        print(f"\n{GREEN}Moved {rep.moved:,} photos to their correct dates.{RESET}")
+        for err in rep.errors[:10]:
+            print(f"  {RED}{err}{RESET}")
+    cat.close()
+    return 0
+
+
 def cmd_log(args) -> int:
     cfg, cat = _load(args)
     for e in reversed(cat.recent_events(args.limit)):
@@ -1145,6 +1185,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--show", type=int, default=15)
     s.add_argument("-y", "--yes", action="store_true")
     s.set_defaults(func=cmd_backup)
+
+    s = sub.add_parser("redate",
+                       help="re-read capture dates and re-file wrongly dated photos")
+    s.add_argument("--apply", action="store_true", help="actually move them")
+    s.add_argument("--limit", type=int)
+    s.add_argument("--show", type=int, default=10)
+    s.set_defaults(func=cmd_redate)
 
     s = sub.add_parser("log", help="recent operations")
     s.add_argument("--limit", type=int, default=20)

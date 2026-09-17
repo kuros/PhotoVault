@@ -100,14 +100,31 @@ def _jpeg_exif_segment(fh) -> bytes | None:
             return payload[6:]
 
 
-def _scan_for_exif(fh, window: int = 512 * 1024) -> bytes | None:
-    """HEIC stores Exif as an iloc-referenced item; locating it properly means
-    walking meta/iinf/iloc. Scanning for the marker gets the same bytes for
-    every camera-produced file we have seen, at a fraction of the code."""
+def _scan_for_exif(fh, window: int = 8 * 1024 * 1024) -> bytes | None:
+    """Find the TIFF block inside a HEIC/HEIF container.
+
+    Do NOT search for "Exif\\0\\0": in HEIF that string appears in the `infe`
+    box that *names* the item, typically ~1 KB in, while the payload it refers
+    to sits much further along (19 KB later in a real iPhone file). Reading
+    from the name gives you container structure, the TIFF parse fails, and the
+    date silently falls back to the file's mtime - which for a downloaded file
+    is the moment it was downloaded.
+
+    Locating it properly means walking meta/iinf/iloc. Scanning for the TIFF
+    magic instead is a fraction of the code and self-validating: a false match
+    has to survive the version check, an IFD walk, and a plausibility test on
+    the date before it is believed.
+    """
     fh.seek(0)
     buf = fh.read(window)
-    idx = buf.find(b"Exif\x00\x00")
-    return buf[idx + 6:] if idx != -1 else None
+    for magic in (b"MM\x00*", b"II*\x00"):
+        start = 0
+        while (idx := buf.find(magic, start)) != -1:
+            candidate = _parse_tiff_dates(buf[idx:])
+            if candidate is not None and _plausible(candidate):
+                return buf[idx:]
+            start = idx + 1
+    return None
 
 
 def _parse_tiff_dates(blob: bytes) -> datetime | None:

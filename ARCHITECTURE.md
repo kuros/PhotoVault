@@ -919,3 +919,51 @@ Two guards now catch the configuration that produced it:
   the fix, rather than failing later as a missing directory.
 - An `immich` source drops any leftover `path` — that value is only ever what someone
   typed before switching the kind.
+
+
+---
+
+## Decision 22: a wrong date is not a cosmetic bug
+
+A user reported that importing was "changing the date the photo was taken". It was not —
+the bytes were untouched, and `sips` read the correct 2018 date straight out of the
+stored file. But PhotoVault had *recorded* the wrong date, and that is nearly as bad,
+because the date is not just a field: it decides the canonical path. Every affected
+photo was filed under `2026/09/` with today's date in its filename.
+
+The cause was in the HEIC metadata scanner. It searched for the string `Exif\0\0`, which
+in a HEIF container appears in the `infe` box that *names* the metadata item — about
+900 bytes in — while the TIFF payload it refers to sat 19 KB further along. The scanner
+found the name, tried to parse container structure as TIFF, failed, and fell through to
+the next strategy.
+
+**The fallback is what made it dangerous.** `capture_time()` ends at the file's mtime,
+which is reasonable for a folder of old photos and completely wrong for anything
+downloaded: mtime is the moment it arrived. So the failure did not look like a failure.
+It produced a confident, plausible, entirely wrong answer.
+
+> **The general lesson:** a fallback chain converts "I could not read this" into "here is
+> an answer", and the further down the chain you go, the more the answer is really a
+> guess wearing the same clothes as a fact. Recording *which* strategy produced each
+> value — the `time_source` column — is what made this diagnosable in one query, and
+> repairable afterwards.
+
+Three fixes, at three different depths:
+
+- **The parser** now scans for the TIFF magic rather than the item name, and validates
+  each candidate by parsing it and checking the date is plausible. A false match has to
+  survive three tests before it is believed.
+- **The Immich path** stamps each downloaded file's mtime with the capture time Immich
+  already knows, so even a total metadata failure now lands on a sensible date instead of
+  today.
+- **`photovault redate`** repairs what was already stored: re-reads the files, moves them
+  to the right path on every device, and updates the catalog.
+
+`redate` has one trap worth naming. `capture_time()` falls back to parsing a date out of
+the *filename* — and by repair time, that filename is one PhotoVault generated from the
+bad date. Trusting it would re-derive the same wrong answer with more confidence. So the
+repair path deliberately uses a narrower reader that consults embedded metadata only.
+
+It also requires every device connected, for the same reason purge does: a rename
+recorded in the catalog but not performed on an absent drive leaves that drive holding a
+file nobody will ever look for again.

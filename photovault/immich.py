@@ -153,10 +153,32 @@ class ImmichClient:
                     fh.write(block)
                     written += len(block)
             tmp.replace(dest)
+            self._stamp_mtime(dest, asset)
         except Exception as exc:
             tmp.unlink(missing_ok=True)
             raise ImmichError(f"downloading {asset.filename}: {exc}") from None
         return written
+
+    @staticmethod
+    def _stamp_mtime(path: Path, asset: ImmichAsset) -> None:
+        """Set the staged file's mtime to when the photo was taken.
+
+        A freshly downloaded file's mtime is the moment it was downloaded, so
+        if metadata extraction ever fails the date fallback lands on today.
+        Immich already parsed the capture time; carrying it across makes the
+        last-resort fallback correct instead of actively wrong.
+        """
+        import os
+        from datetime import datetime
+
+        if not asset.created_at:
+            return
+        try:
+            when = datetime.fromisoformat(asset.created_at.replace("Z", "+00:00"))
+            stamp = when.timestamp()
+            os.utime(path, (stamp, stamp))
+        except (ValueError, OSError):
+            pass
 
     def delete(self, asset_ids: list[str], *, force: bool = False) -> int:
         """Release Immich's own copies. Soft by default: they land in its trash.

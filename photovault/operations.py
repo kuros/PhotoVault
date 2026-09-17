@@ -97,6 +97,19 @@ CATALOGUE: list[Operation] = [
         note="Finds candidates only. Nothing is deleted until you review them "
              "in the Duplicates tab and choose what to keep."),
     Operation(
+        id="redate", title="Fix wrong dates", group="Maintenance",
+        what="Re-reads capture dates from the photos themselves and re-files "
+             "any that were stored under a guessed date.",
+        when="After importing from a source where metadata could not be read — "
+             "downloads in particular, whose file date is when they arrived.",
+        risk=CAREFUL, action=None, command="photovault redate --apply",
+        needs_all_devices=True,
+        event_kinds=("redate",),
+        note="Moves files on every device, so all of them must be connected. "
+             "Previews by default. Only the photo's own embedded metadata is "
+             "trusted — never the filename, which PhotoVault wrote from the "
+             "bad date in the first place."),
+    Operation(
         id="reconcile", title="Re-check devices", group="Maintenance",
         what="Asks every connected device what it actually holds and corrects "
              "the catalog's record.",
