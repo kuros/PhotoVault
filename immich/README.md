@@ -29,28 +29,51 @@ delete your archive — a property, not a policy.
 Keep `db` on an always-available disk. Immich cannot start without its database, so
 never put it on a drive you unplug.
 
-### Do not upload through the Immich mobile app
+### Upload through Immich — PhotoVault drains it
 
-This is the one thing that breaks the single-copy property. Managed uploads land in
-Immich's own storage, and External Libraries are read-only by design, so you cannot
-upload *into* one. A photo sent through the app would exist twice: once in Immich's
-upload tree and again in your library after PhotoVault imported it.
-
-Bring phone photos in through PhotoVault instead — Image Capture on iOS, `adb` on
-Android, or any folder you point a source at. Immich's nightly external scan picks
-them up.
+Immich is the front door. It has authenticated apps on every platform, so any device
+can put a photo in; PhotoVault then archives it and asks Immich to release its own
+copy. One permanent copy, no hardlinks.
 
 ```
-iPhone  ──Image Capture──┐
-Android ──adb────────────┤→ inbox → photovault import → ~/PhotoVault/library
-                                                              ↓
-                                          Immich external scan → browse, search, faces
+any device ──► Immich app/web ──► Immich managed storage      (transient)
+                                        │
+                              photovault import ──► library + every device
+                                        │
+                           verify min_copies, then Immich releases its copy
+                                        │
+                           external rescan → still visible in Immich
 ```
 
-You give up the Immich app's uploader. You do **not** give up freeing space on your
-phone: `photovault reclaim` does that job on stricter evidence than Immich's "free up
-space", which releases a photo once it reaches the Immich server — one copy, on one
-drive, never scrubbed.
+Add it as a source — in **Settings → Sources**, pick kind `immich`, enter the URL and
+an API key (Account Settings → API Keys), and press **Test**. Or in `config.toml`:
+
+```toml
+[[source]]
+device = "immich"
+kind = "immich"
+url = "http://localhost:2283"
+api_key = "env:IMMICH_API_KEY"     # or paste it; env: keeps it out of the file
+```
+
+There are no per-device sources to maintain any more. iPhone, iPad, Android, a
+borrowed laptop — everything goes to Immich, and PhotoVault drains one place.
+
+**Three things that make this safe:**
+
+*Only managed assets are touched.* Assets carrying a `libraryId` came from the External
+Library — which is your archive. PhotoVault never pulls or deletes those.
+
+*Release is gated on verified copies.* Immich only lets go once `min_copies` devices
+have been asked to re-read and re-hash the bytes. Fewer devices connected simply means
+fewer releases; the duplicate is always the safe failure.
+
+*The delete is soft.* Released assets go to Immich's own trash, not oblivion, so even a
+mistake at this point is recoverable from inside Immich.
+
+**One real cost:** after the swap, Immich sees the photo as a new asset via the external
+library. Albums or favourites set on it in the window between uploading and importing
+are lost. Upload, import, *then* organise.
 
 ### Why not the other way round
 

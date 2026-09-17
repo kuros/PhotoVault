@@ -783,3 +783,54 @@ What this costs is the Immich uploader, and the honest accounting is that it cos
 than it appears: `photovault reclaim` already does the phone-clearing job on stricter
 evidence than Immich's own "free up space", which releases a photo once it reaches the
 Immich server — one copy, on one drive, never verified.
+
+
+---
+
+## Decision 19: make the other system the front door
+
+PhotoVault's web UI binds to loopback and has no authentication, so a phone cannot
+reach it. That is a deliberate constraint — adding auth to a program that can delete
+files is not a small undertaking — but it means PhotoVault cannot be the thing you
+upload to.
+
+Immich already is. It has authenticated apps on every platform. So rather than
+duplicating that work, or accepting two copies of every photo, PhotoVault **drains**
+it: pull the managed assets over the API, archive them, verify, then ask Immich to
+release its own copies.
+
+The result is one permanent copy, no hardlinks, and no per-device source configuration
+at all — every device is simply an Immich client.
+
+> **The general lesson:** when a neighbouring system already solves the part you are
+> weakest at, integrating is usually cheaper than either duplicating it or contorting
+> your own design around the gap. The interesting question is which system owns the
+> bytes at rest, not which one the user touches first.
+
+### Three properties hold the safety together
+
+- **Only managed assets are ever touched.** An asset with a `libraryId` came from an
+  External Library — which, in this arrangement, *is* PhotoVault's library. Pulling
+  those would re-import the archive into itself; deleting them would ask Immich to
+  remove a directory it only reads. Every call filters on that field.
+- **Release is gated on re-read bytes**, the same rule as every other destructive
+  operation here. Fewer devices connected means fewer releases.
+- **Deletion is soft.** `DELETE /assets` takes a `force` flag; leaving it false puts
+  the asset in Immich's own trash. PhotoVault has already verified `min_copies` by
+  then, so this is a second net rather than the only one.
+
+Every failure path errs toward a duplicate. A photo Immich still holds is wasted space;
+a photo neither holds is gone.
+
+### Testing against a stub, not a mock
+
+The client is tested against a small HTTP server implementing the endpoints from the
+pinned version's OpenAPI spec. Real sockets, real headers, real JSON — because the
+client's entire job is speaking HTTP correctly, and a mock would have validated my
+assumptions rather than the protocol.
+
+That caught a bug worth keeping: the Settings "Test" button used `ping()`, which
+returns a bare `False`, so a wrong API key and an unreachable host produced the same
+message — *"no response, check the URL"* — while the URL was fine. The fix was to make
+the real call and surface its reason. **A diagnostic that cannot distinguish between
+failure modes is not a diagnostic.**

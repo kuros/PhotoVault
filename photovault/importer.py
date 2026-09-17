@@ -43,6 +43,17 @@ class ReclaimReport:
 
 
 @dataclass
+class ImmichDrain:
+    """What happened to Immich's own copies after the archive took them."""
+    pulled: int = 0
+    already_known: int = 0
+    released: int = 0
+    held: int = 0
+    rescanned: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ImportReport:
     device: str = ""
     pulled: int = 0
@@ -51,6 +62,7 @@ class ImportReport:
     replicated: dict[str, int] = field(default_factory=dict)
     unreachable: list[str] = field(default_factory=list)
     reclaim: ReclaimReport | None = None
+    immich: ImmichDrain | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -129,6 +141,88 @@ def adb_delete(paths: list[str], *, serial: str | None = None) -> int:
     return removed
 
 
+# ---------------------------------------------------------------------- Immich
+
+def _immich_seen(catalog: Catalog, device: str) -> set[str]:
+    """Immich asset ids already pulled, so nothing is downloaded twice."""
+    rows = catalog.db.execute(
+        "SELECT abs_path FROM source_file WHERE device = ? AND abs_path LIKE 'immich:%'",
+        (device,)).fetchall()
+    return {r["abs_path"][len("immich:"):] for r in rows}
+
+
+def pull_from_immich(cfg: Config, catalog: Catalog, spec: SourceSpec, root: Path,
+                     *, report_fn=print) -> tuple[ImmichDrain, dict[str, str]]:
+    """Download Immich's managed assets into a staging folder.
+
+    Returns the drain stats and a map of {local filename: immich asset id}, so
+    that once the archive has verified its copies we know exactly which assets
+    Immich may release.
+    """
+    from .immich import ImmichClient, ImmichError
+
+    drain = ImmichDrain()
+    mapping: dict[str, str] = {}
+    client = ImmichClient(spec.url, spec.api_key)
+
+    if not client.ping():
+        drain.errors.append(f"cannot reach Immich at {spec.url}")
+        return drain, mapping
+
+    seen = _immich_seen(catalog, spec.device)
+    try:
+        for asset in client.managed_assets():
+            if asset.id in seen:
+                drain.already_known += 1
+                continue
+            # Keep the asset id in the filename: staging is flat, and two
+            # phones can easily both produce IMG_0001.jpg.
+            safe = Path(asset.filename).name or f"{asset.id}.jpg"
+            local = root / f"{asset.id[:8]}_{safe}"
+            try:
+                client.download(asset, local)
+            except ImmichError as exc:
+                drain.errors.append(str(exc))
+                continue
+            mapping[local.name] = asset.id
+            drain.pulled += 1
+            if drain.pulled % 25 == 0:
+                report_fn(f"    pulled {drain.pulled}")
+    except ImmichError as exc:
+        drain.errors.append(str(exc))
+
+    return drain, mapping
+
+
+def release_from_immich(cfg: Config, catalog: Catalog, spec: SourceSpec,
+                        mapping: dict[str, str], reclaim: ReclaimReport,
+                        drain: ImmichDrain, *, report_fn=print) -> None:
+    """Ask Immich to drop its copies of photos the archive has verified.
+
+    Only assets whose bytes were re-read and re-hashed on `min_copies` devices
+    are released, and the delete is soft - they land in Immich's own trash. A
+    photo Immich still holds is a duplicate; a photo neither holds is gone, so
+    every failure here errs towards the duplicate.
+    """
+    from .immich import ImmichClient, ImmichError
+
+    safe_names = {path.name for path, _, _ in reclaim.safe}
+    releasable = [asset_id for name, asset_id in mapping.items()
+                  if name in safe_names]
+    drain.held = len(mapping) - len(releasable)
+
+    if not releasable:
+        return
+    try:
+        client = ImmichClient(spec.url, spec.api_key)
+        drain.released = client.delete(releasable, force=False)
+        report_fn(f"  Immich released {drain.released} of its copies "
+                  f"(recoverable from its trash)")
+        drain.rescanned = client.trigger_library_scan()
+    except ImmichError as exc:
+        drain.errors.append(f"could not release Immich copies: {exc}")
+
+
 # --------------------------------------------------------------------- reclaim
 
 def verified_copies(cfg: Config, catalog: Catalog, hash_: str, rel_path: str,
@@ -205,7 +299,21 @@ def run_import(cfg: Config, catalog: Catalog, spec: SourceSpec, *,
     rep = ImportReport(device=spec.device)
     staging: tempfile.TemporaryDirectory | None = None
 
-    if spec.kind == "adb":
+    if spec.kind == "immich":
+        staging = tempfile.TemporaryDirectory(prefix="photovault-immich-")
+        root = Path(staging.name)
+        report_fn(f"  pulling from Immich at {spec.url}...")
+        drain, immich_map = pull_from_immich(cfg, catalog, spec, root,
+                                             report_fn=report_fn)
+        rep.immich = drain
+        rep.pulled = drain.pulled
+        rep.errors.extend(drain.errors[:10])
+        if not drain.pulled:
+            report_fn(f"  nothing new ({drain.already_known} already archived)")
+            staging.cleanup()
+            return rep
+    elif spec.kind == "adb":
+        immich_map = {}
         staging = tempfile.TemporaryDirectory(prefix="photovault-adb-")
         root = Path(staging.name)
         report_fn(f"  pulling from Android ({spec.path or '/sdcard/DCIM'})...")
@@ -218,6 +326,7 @@ def run_import(cfg: Config, catalog: Catalog, spec: SourceSpec, *,
             staging.cleanup()
             return rep
     else:
+        immich_map = {}
         root = Path(spec.path).expanduser()
         if not root.is_dir():
             rep.errors.append(f"{root} does not exist")
@@ -228,6 +337,34 @@ def run_import(cfg: Config, catalog: Catalog, spec: SourceSpec, *,
         rep.imported, rep.duplicates = st.imported, st.duplicates
         rep.errors.extend(st.errors[:10])
         report_fn(f"  imported {st.imported}, {st.duplicates} already known")
+
+        if spec.kind == "immich" and immich_map:
+            # Record the Immich asset id, not the temporary staging path, so a
+            # later run knows this asset is already archived and skips the
+            # download. Staging is a temp directory - its paths are meaningless
+            # once the run ends.
+            with catalog.tx():
+                for name, asset_id in immich_map.items():
+                    staged = root / name
+                    if not staged.is_file():
+                        continue
+                    try:
+                        digest, _ = hash_file(staged)
+                    except OSError:
+                        continue
+                    if catalog.has_asset(digest):
+                        catalog.record_source(digest, spec.device,
+                                              f"immich:{asset_id}")
+
+        if spec.kind in ("immich", "adb"):
+            # ingest_source() recorded where it found each file, which for these
+            # sources is a temp directory that no longer exists a moment later.
+            # A source row that can never be looked at again is worse than no
+            # row: it makes the audit trail look complete when it is not.
+            with catalog.tx():
+                catalog.db.execute(
+                    "DELETE FROM source_file WHERE device = ? AND abs_path LIKE ?",
+                    (spec.device, f"{root}%"))
 
         from . import sync as sync_mod
         for replica in cfg.replicas:
@@ -241,8 +378,13 @@ def run_import(cfg: Config, catalog: Catalog, spec: SourceSpec, *,
                 rep.unreachable.append(replica.name)
                 report_fn(f"  {replica.name}: unavailable ({exc})")
 
+        # For Immich the reclaim check always runs: releasing Immich's copy is
+        # the whole point, and it must be gated on verified copies either way.
         rep.reclaim = reclaimable(cfg, catalog, root, device=spec.device,
-                                  apply=reclaim)
+                                  apply=reclaim or spec.kind == "immich")
+        if spec.kind == "immich" and rep.immich:
+            release_from_immich(cfg, catalog, spec, immich_map, rep.reclaim,
+                                rep.immich, report_fn=report_fn)
         if reclaim and spec.kind == "adb" and rep.reclaim.deleted:
             # Staging is a copy; the originals still live on the phone.
             names = {p.name for p, _, _ in rep.reclaim.safe}

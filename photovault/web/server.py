@@ -151,6 +151,8 @@ class VaultHandler(BaseHTTPRequestHandler):
                 return self._json({"purged": rep.purged,
                                    "bytes_freed": rep.bytes_freed,
                                    "errors": rep.errors[:10]})
+            if url.path == "/api/sources/test":
+                return self._test_source(body)
             if url.path == "/api/uploads/discard":
                 return self._json({"discarded": uploads.discard(self.cfg)})
             if url.path == "/api/duplicates/decide":
@@ -387,6 +389,47 @@ class VaultHandler(BaseHTTPRequestHandler):
             return self._json({"error": result.reason, "path": raw_path}, 400)
         return self._json({"stored": True, "path": result.path,
                            "size": result.size})
+
+    def _test_source(self, body: dict):
+        """Check a source is reachable before the user commits to it."""
+        kind = body.get("kind", "local")
+        if kind == "immich":
+            from ..immich import ImmichClient, ImmichError
+            try:
+                client = ImmichClient(body.get("url", ""), body.get("api_key", ""))
+            except ImmichError as exc:
+                return self._json({"ok": False, "detail": str(exc)})
+            # Deliberately not ping(): it returns a bare False, so a wrong
+            # API key and an unreachable host looked identical. The real call
+            # carries a reason the user can act on.
+            try:
+                managed = sum(1 for _ in client.managed_assets(page_size=100))
+            except ImmichError as exc:
+                return self._json({"ok": False, "detail": str(exc)})
+            return self._json({
+                "ok": True,
+                "detail": f"connected — {managed:,} photo"
+                          f"{'' if managed == 1 else 's'} waiting to be archived"})
+
+        if kind == "adb":
+            from ..importer import adb_available, adb_devices
+            if not adb_available():
+                return self._json({"ok": False, "detail":
+                                   "adb not installed (brew install "
+                                   "android-platform-tools)"})
+            found = adb_devices()
+            return self._json({"ok": bool(found), "detail":
+                               f"{len(found)} device(s) connected" if found
+                               else "no Android device connected"})
+
+        path = Path(body.get("path", "")).expanduser()
+        if not path.is_dir():
+            return self._json({"ok": False, "detail": "folder does not exist"})
+        from ..ingest import WANTED_EXT, iter_media
+        from ..mediatime import normalize_ext
+        n = sum(1 for p in iter_media(path) if normalize_ext(p) in WANTED_EXT)
+        return self._json({"ok": True,
+                           "detail": f"{n:,} photo{'' if n == 1 else 's'} found"})
 
     def _save_config(self, body: dict):
         """Validate and persist a config edited in the UI.

@@ -28,7 +28,9 @@ class ReplicaSpec:
 class SourceSpec:
     device: str
     path: str
-    kind: str = "local"   # local = a folder; adb = an Android device over USB
+    kind: str = "local"   # local = a folder; adb = Android over USB; immich = API
+    url: str = ""         # immich only
+    api_key: str = ""     # immich only; "env:VARNAME" keeps it out of the file
     # Inboxes should empty once their photos are safely in the library;
     # a folder you also browse (an Apple Photos library) must never be touched.
     clear_after_import: bool = False
@@ -117,6 +119,7 @@ def load(path: Path | None = None) -> Config:
         replicas=replicas,
         sources=[SourceSpec(device=s["device"], path=s.get("path", ""),
                             kind=s.get("kind", "local"),
+                            url=s.get("url", ""), api_key=s.get("api_key", ""),
                             clear_after_import=bool(s.get("clear_after_import", False)))
                  for s in raw.get("source", [])],
     )
@@ -128,6 +131,13 @@ def load(path: Path | None = None) -> Config:
     if "catalog" in vault:
         cfg.catalog_path = Path(vault["catalog"]).expanduser()
     cfg.replica(cfg.primary)  # fail fast if primary points at nothing
+    for r in cfg.replicas:
+        pass
+    for src in cfg.sources:
+        if src.kind == "immich" and not src.url:
+            raise ValueError(f"source {src.device!r} is kind=immich but has no url")
+        if src.kind in ("local", "adb") and not src.path:
+            raise ValueError(f"source {src.device!r} has no path")
     for r in cfg.replicas:
         if r.mode not in ("full", "shard"):
             raise ValueError(f"replica {r.name!r}: mode must be 'full' or 'shard'")
@@ -277,6 +287,10 @@ def render(data: dict) -> str:
                   f'device = {_toml_str(src["device"])}']
         if src.get("kind", "local") != "local":
             lines.append(f'kind = {_toml_str(src["kind"])}')
+        if src.get("url"):
+            lines.append(f'url = {_toml_str(src["url"])}')
+        if src.get("api_key"):
+            lines.append(f'api_key = {_toml_str(src["api_key"])}')
         if src.get("path"):
             lines.append(f'path = {_toml_str(src["path"])}')
         if src.get("clear_after_import"):
@@ -302,6 +316,7 @@ def to_dict(cfg: "Config") -> dict:
         ],
         "source": [
             {"device": s.device, "kind": s.kind, "path": s.path,
+             "url": s.url, "api_key": s.api_key,
              "clear_after_import": s.clear_after_import}
             for s in cfg.sources
         ],

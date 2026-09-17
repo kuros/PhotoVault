@@ -818,21 +818,47 @@ function renderSettings() {
              placeholder="SSH host, e.g. you@192.168.1.50"></div>` : ''}`).join('')
     || '<p class="muted">No devices yet. Add one above.</p>';
 
-  $('#sourceRows').innerHTML = (draft.source || []).map((s, i) => `
+  const KIND_HINT = {
+    local: 'A folder on this Mac. Sub-folders are included.',
+    adb: 'An Android phone over USB. Needs adb installed.',
+    immich: 'Immich becomes the front door: every device uploads there, and '
+          + 'PhotoVault archives and then releases Immich\'s copy, so nothing '
+          + 'is stored twice.',
+  };
+
+  $('#sourceRows').innerHTML = (draft.source || []).map((s, i) => {
+    const kind = s.kind || 'local';
+    const second = kind === 'immich'
+      ? `<input type="text" value="${s.url ?? ''}" data-field="url"
+                placeholder="http://localhost:2283">`
+      : `<input type="text" value="${s.path ?? ''}" data-field="path"
+                placeholder="${kind === 'adb' ? '/sdcard/DCIM' : '/path/to/folder'}">`;
+    const extra = kind === 'immich'
+      ? `<div class="row" data-kind="source" data-i="${i}"
+              style="grid-template-columns:1fr auto">
+           <input type="text" value="${s.api_key ?? ''}" data-field="api_key"
+                  placeholder="API key, or env:IMMICH_API_KEY to keep it out of the file">
+           <button class="btn btn--sm" data-test="${i}">Test</button>
+         </div>`
+      : '';
+    return `
     <div class="row row--source" data-kind="source" data-i="${i}">
       <input type="text" value="${s.device ?? ''}" data-field="device" placeholder="name">
       <select data-field="kind">
-        ${['local', 'adb'].map((k) =>
-          `<option value="${k}"${s.kind === k ? ' selected' : ''}>${k}</option>`).join('')}
+        ${['local', 'adb', 'immich'].map((k) =>
+          `<option value="${k}"${kind === k ? ' selected' : ''}>${k}</option>`).join('')}
       </select>
-      <input type="text" value="${s.path ?? ''}" data-field="path"
-             placeholder="${s.kind === 'adb' ? '/sdcard/DCIM' : '/path/to/folder'}">
+      ${second}
       <span class="row__flags">
-        <label title="Delete originals once they have min_copies verified copies">
-          <input type="checkbox" data-field="clear_after_import"${s.clear_after_import ? ' checked' : ''}>clear after import</label>
+        ${kind === 'immich' ? '' : `<label title="Delete originals once they have min_copies verified copies">
+          <input type="checkbox" data-field="clear_after_import"${s.clear_after_import ? ' checked' : ''}>clear after import</label>`}
+        ${kind !== 'immich' ? `<button class="btn btn--sm" data-test="${i}">Test</button>` : ''}
       </span>
       <button class="row__del" data-del="source" data-i="${i}" title="Remove">&times;</button>
-    </div>`).join('')
+    </div>
+    ${extra}
+    <p class="muted" style="font-size:12px;margin:-4px 0 2px 2px">${KIND_HINT[kind]}</p>`;
+  }).join('')
     || '<p class="muted">No sources yet. Add one above.</p>';
 }
 
@@ -878,7 +904,7 @@ function attachSettings() {
     loadSettings().then(() => banner('Reloaded from disk.', 'ok'));
   });
 
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', async (e) => {
     const add = e.target.closest('[data-add]');
     if (add && draft) {
       collect();
@@ -888,7 +914,8 @@ function attachSettings() {
             offline: true, mode: 'full', capacity: 'auto' });
       } else {
         (draft.source = draft.source || []).push(
-          { device: 'phone', kind: 'local', path: '', clear_after_import: false });
+          { device: 'photos', kind: 'local', path: '', url: '', api_key: '',
+            clear_after_import: false });
       }
       renderSettings();
       return;
@@ -900,6 +927,24 @@ function attachSettings() {
       const list = del.dataset.del === 'replica' ? draft.replica : draft.source;
       list.splice(Number(del.dataset.i), 1);
       renderSettings();
+      return;
+    }
+
+    const test = e.target.closest('[data-test]');
+    if (test && draft) {
+      collect();
+      const src = draft.source[Number(test.dataset.test)];
+      test.disabled = true;
+      test.textContent = '…';
+      try {
+        const res = await post('sources/test', src);
+        banner(`${src.device}: ${res.detail}`, res.ok ? 'ok' : 'bad');
+      } catch (err) {
+        banner(err.message, 'bad');
+      } finally {
+        test.disabled = false;
+        test.textContent = 'Test';
+      }
       return;
     }
 
