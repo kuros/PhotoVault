@@ -26,6 +26,11 @@ services:
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION}
     volumes:
       - ${UPLOAD_LOCATION}:/usr/src/app/upload
+      # PhotoVault's library, mounted READ-ONLY as an external library. Immich
+      # indexes it in place - no second copy of 57 GB, and the :ro flag means
+      # Immich physically cannot delete your archive, even from its own UI.
+      # The container path is what you type into Immich, not the host path.
+      - ${PHOTOVAULT_LIBRARY}:/mnt/photovault:ro
       - /etc/localtime:/etc/localtime:ro
     env_file: [.env]
     ports:
