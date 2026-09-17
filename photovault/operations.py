@@ -63,15 +63,17 @@ CATALOGUE: list[Operation] = [
         note="Devices that are not connected are skipped, not failed. "
              "Reconnect them and run it again."),
     Operation(
-        id="backup", title="Back up the catalog", group="Routine",
-        what="Writes a compressed, checksummed snapshot of the catalog to "
-             "every connected device.",
-        when="After any session where you reviewed duplicates or deleted "
-             "photos.",
+        id="backup", title="Back up decisions", group="Routine",
+        what="Snapshots the catalog, and — when Immich is configured — its "
+             "database and a plain-JSON list of your albums. All checksummed "
+             "and copied to every connected device.",
+        when="After any session where you reviewed duplicates, deleted photos, "
+             "or organised albums in Immich.",
         risk=SAFE, action="backup", command="photovault backup",
         event_kinds=("backup",),
-        note="Your photos can be rebuilt from the files; your decisions cannot. "
-             "Duplicate choices and trash state exist only in the catalog."),
+        note="Your photos can be rebuilt from the files. Your judgement cannot: "
+             "duplicate choices, trash state and album membership exist nowhere "
+             "else. A 'colima delete' would take Immich's albums with it."),
 
     # ------------------------------------------------------------ maintenance
     Operation(

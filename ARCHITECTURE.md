@@ -834,3 +834,53 @@ returns a bare `False`, so a wrong API key and an unreachable host produced the 
 message — *"no response, check the URL"* — while the URL was fine. The fix was to make
 the real call and surface its reason. **A diagnostic that cannot distinguish between
 failure modes is not a diagnostic.**
+
+
+---
+
+## Decision 20: two backups, because they answer different questions
+
+Immich's Postgres holds the only copy of your albums, the names you gave to faces, and
+your favourites. A `colima delete` takes all of it, and none of it can be reconstructed
+from the photos. So it gets backed up — twice, in two forms, because a single artifact
+cannot do both jobs.
+
+**The database dump** answers *"how do I get my Immich back?"* Complete, and completely
+version-locked: it restores only into a compatible Postgres and a compatible Immich
+schema. On a project shipping every few days, that guarantee decays.
+
+**The album manifest** answers *"what did I decide belonged together?"* A few kilobytes
+of JSON naming each album and the **library paths** of its photos — deliberately not
+Immich asset ids, which are meaningless the moment Immich is gone. A library path is the
+same string PhotoVault stores in `asset.rel_path`, so the manifest stays joinable to the
+archive forever, and is legible to a human rebuilding albums by hand.
+
+> **The general lesson:** when you back up a system you do not control, distinguish the
+> restore that is complete-but-fragile from the record that is partial-but-durable. Keep
+> both. The cheap one is usually the one that saves you.
+
+### Excluding what the system regenerates
+
+A naive `pg_dump` of Immich is dominated by data it rebuilds itself: `geodata_places`
+alone is ~119 MB of static reverse-geocoding reference data, and `smart_search` /
+`face_search` hold ML embeddings that are re-derived by re-running the jobs against
+photos you still have.
+
+Those are excluded with `--exclude-table-data`, not `--exclude-table`: the **schema stays**
+so the restore is valid and Immich repopulates them. On a real instance that produced a
+1.1 MB dump instead of a ~130 MB one — which is what makes weekly rotation affordable,
+and therefore what makes it actually happen.
+
+### Backups ride with the catalog, and fail independently
+
+The artifacts go into the same `.photovault-backups/` tree, on the same devices, with the
+same checksums — but each kind rotates on its own key. A shared rotation would let a run
+of frequent catalog snapshots evict the Immich dumps, which are written less often.
+
+And the ordering is deliberate: the catalog snapshot happens first, and an Immich failure
+is *reported* rather than raised. A broken container or an expired API key must never
+cost you the backup of the thing that cannot be regenerated.
+
+One check worth keeping: a dump not ending in PostgreSQL's completion marker is flagged
+as suspect. A truncated dump restores as a silently partial database, which is a worse
+outcome than no dump at all.

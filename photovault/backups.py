@@ -52,6 +52,9 @@ class BackupResult:
     unreachable: list[str] = field(default_factory=list)
     pruned: int = 0
     errors: list[str] = field(default_factory=list)
+    # Immich's database dump and album manifest, when it is configured.
+    immich: object | None = None
+    extra_bytes: int = 0
 
 
 def snapshot(catalog_path: Path, dest: Path) -> tuple[int, str]:
@@ -95,6 +98,25 @@ def run(cfg: Config, *, keep: int = KEEP, label: str = "catalog") -> BackupResul
         (Path(tmp) / f"{result.name}.sha256").write_text(
             f"{result.digest}  {result.name}\n")
 
+        # Immich's database and albums ride along in the same tree, on the same
+        # devices, with the same checksums and the same rotation. A failure here
+        # never stops the catalog backup: the catalog is the part that cannot be
+        # regenerated.
+        artifacts = [result.name]
+        if cfg.immich.enabled:
+            from . import immich_backup
+            art = immich_backup.run(cfg, Path(tmp), stamp)
+            result.immich = art
+            result.errors.extend(art.errors[:10])
+            for name in (art.dump_name, art.manifest_name):
+                if not name:
+                    continue
+                path = Path(tmp) / name
+                digest = _sha256_file(path)
+                (Path(tmp) / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+                artifacts.append(name)
+                result.extra_bytes += path.stat().st_size
+
         for spec in cfg.replicas:
             drv = driver_for(spec)
             try:
@@ -106,18 +128,28 @@ def run(cfg: Config, *, keep: int = KEEP, label: str = "catalog") -> BackupResul
                 continue
 
             try:
-                rel = f"{BACKUP_DIR}/{result.name}"
-                drv.put(staged, rel)
-                drv.put(Path(tmp) / f"{result.name}.sha256", rel + ".sha256")
+                for name in artifacts:
+                    rel = f"{BACKUP_DIR}/{name}"
+                    drv.put(Path(tmp) / name, rel)
+                    drv.put(Path(tmp) / f"{name}.sha256", rel + ".sha256")
                 result.copied.append(spec.name)
             except (OSError, ReplicaError) as exc:
                 result.errors.append(f"{spec.name}: {exc}")
                 continue
 
             if isinstance(drv, LocalDriver):
-                result.pruned += prune(spec, keep=keep, label=label)
+                for prefix in (label, "immich-db", "immich-albums"):
+                    result.pruned += prune(spec, keep=keep, label=prefix)
 
     return result
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while block := fh.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def prune(spec, *, keep: int = KEEP, label: str = "catalog") -> int:
@@ -130,7 +162,11 @@ def prune(spec, *, keep: int = KEEP, label: str = "catalog") -> int:
     root = backup_root(spec)
     if not root.is_dir():
         return 0
-    snaps = sorted(root.glob(f"{label}-*.db.gz"), reverse=True)
+    pattern = {"catalog": "catalog-*.db.gz",
+               "immich-db": "immich-db-*.sql.gz",
+               "immich-albums": "immich-albums-*.json"}.get(label,
+                                                           f"{label}-*.db.gz")
+    snaps = sorted(root.glob(pattern), reverse=True)
     removed = 0
     for old in snaps[keep:]:
         try:

@@ -50,6 +50,16 @@ class StubImmich(BaseHTTPRequestHandler):
             return self._send(401, {"message": "invalid api key"})
         if self.path == "/api/server/ping":
             return self._send(200, {"res": "pong"})
+        if self.path == "/api/albums":
+            albums = getattr(type(self), "albums", {})
+            return self._send(200, [{"id": a["id"], "albumName": a["albumName"]}
+                                    for a in albums.values()])
+        if self.path.startswith("/api/albums/"):
+            wanted = self.path.split("/")[3]
+            for a in getattr(type(self), "albums", {}).values():
+                if a["id"] == wanted:
+                    return self._send(200, a)
+            return self._send(404, {"message": "no album"})
         if self.path.startswith("/api/assets/") and self.path.endswith("/original"):
             asset_id = self.path.split("/")[3]
             asset = type(self).assets.get(asset_id)
@@ -99,6 +109,7 @@ class ImmichTestCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
         StubImmich.assets = {}
+        StubImmich.albums = {}
         StubImmich.deleted = []
         StubImmich.scans = []
         StubImmich.require_key = True
@@ -333,3 +344,127 @@ class TestSourceTestEndpoint(ImmichTestCase):
         res = self.probe({"kind": "local", "path": str(folder)})
         self.assertTrue(res["ok"])
         self.assertIn("3 photos", res["detail"])
+
+
+class TestImmichBackup(ImmichTestCase):
+    """Albums and Immich's database live only in Postgres, which a
+    `colima delete` destroys. These are the artifacts that survive it."""
+
+    def setUp(self):
+        super().setUp()
+        from photovault.config import ImmichSpec
+        self.cfg.immich = ImmichSpec(
+            compose_file=str(self.tmp / "docker-compose.yml"),
+            url=self.url)
+
+    def add_album(self, name: str, asset_ids: list[str], description: str = ""):
+        StubImmich.albums = getattr(StubImmich, "albums", {})
+        # Real Immich uses UUIDs; a name with a space would not survive a URL.
+        album_id = f"a{abs(hash(name)) % 10**8:08d}-0000-4000-8000-000000000000"
+        StubImmich.albums[name] = {
+            "id": album_id, "albumName": name,
+            "description": description, "createdAt": "2026-01-01T00:00:00.000Z",
+            "assets": [{"id": a,
+                        "originalFileName": f"IMG_{a[:4]}.jpg",
+                        "originalPath": f"/mnt/photovault/2024/03/{a[:8]}.jpg",
+                        "checksum": "abc=="} for a in asset_ids],
+        }
+
+    def test_manifest_records_library_paths_not_asset_ids(self):
+        """Asset ids are meaningless once Immich is gone. A library path is the
+        same string PhotoVault stores, so the manifest stays joinable forever."""
+        from photovault import immich_backup
+
+        ids = [self.add_asset(n) for n in (1, 2)]
+        self.add_album("Italy 2019", ids, "a trip")
+        manifest, errors = immich_backup.album_manifest(self.cfg)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(manifest["albums"]), 1)
+        album = manifest["albums"][0]
+        self.assertEqual(album["name"], "Italy 2019")
+        self.assertEqual(album["photo_count"], 2)
+        for photo in album["photos"]:
+            self.assertFalse(photo["library_path"].startswith("/mnt/"),
+                             "the container prefix should be stripped")
+            self.assertTrue(photo["library_path"].startswith("2024/"))
+
+    def test_manifest_is_plain_readable_json(self):
+        from photovault import immich_backup
+
+        ids = [self.add_asset(n) for n in (1,)]
+        self.add_album("Wedding", ids)
+        manifest, _ = immich_backup.album_manifest(self.cfg)
+        text = json.dumps(manifest, indent=2)
+        self.assertIn("Wedding", text)
+        self.assertIn("photovault_album_manifest", text)
+
+    def test_no_immich_source_fails_soft(self):
+        """A broken album export must never stop a photo backup."""
+        from photovault import immich_backup
+
+        self.cfg.sources = []
+        manifest, errors = immich_backup.album_manifest(self.cfg)
+        self.assertEqual(manifest, {})
+        self.assertTrue(any("no immich source" in e for e in errors))
+
+    def test_a_missing_compose_file_is_reported_not_raised(self):
+        from photovault import immich_backup
+
+        size, errors = immich_backup.dump_database(
+            self.cfg, self.tmp / "dump.sql.gz")
+        self.assertEqual(size, 0)
+        self.assertTrue(errors)
+        self.assertFalse((self.tmp / "dump.sql.gz").exists())
+
+    def test_run_survives_everything_being_broken(self):
+        from photovault import immich_backup
+
+        self.cfg.sources = []
+        art = immich_backup.run(self.cfg, self.tmp, "20260101-000000")
+        self.assertFalse(art.any_produced)
+        self.assertTrue(art.errors)
+
+    def test_rederivable_tables_are_excluded_by_data_only(self):
+        """Schema must stay so a restore is valid; only the rows are dropped,
+        because Immich regenerates geodata and ML embeddings itself."""
+        from photovault import immich_backup
+
+        for table in ("geodata_places", "smart_search", "face_search"):
+            self.assertIn(table, immich_backup.REDERIVABLE)
+
+
+class TestBackupReplication(ImmichTestCase):
+    """Immich's artifacts ride to every device with the catalog."""
+
+    def test_artifacts_reach_every_connected_device(self):
+        from photovault import backups
+        from photovault.catalog import Catalog
+
+        cat = Catalog(self.cfg.catalog_path)
+        cat.close()
+        res = backups.run(self.cfg)
+        self.assertEqual(sorted(res.copied), ["hdd", "mac"])
+        for replica in ("mac", "hdd"):
+            root = self.tmp / replica / backups.BACKUP_DIR
+            self.assertTrue(list(root.glob("catalog-*.db.gz")))
+            self.assertTrue(list(root.glob("*.sha256")))
+
+    def test_each_artifact_kind_rotates_separately(self):
+        """One shared rotation would let a run of catalog snapshots evict the
+        Immich dumps, which are written less often."""
+        from photovault import backups
+
+        root = self.tmp / "mac" / backups.BACKUP_DIR
+        root.mkdir(parents=True, exist_ok=True)
+        for i in range(6):
+            (root / f"catalog-2026010{i}-000000.db.gz").write_bytes(b"x")
+            (root / f"immich-db-2026010{i}-000000.sql.gz").write_bytes(b"x")
+            (root / f"immich-albums-2026010{i}-000000.json").write_bytes(b"x")
+
+        spec = self.cfg.replica("mac")
+        for label in ("catalog", "immich-db", "immich-albums"):
+            backups.prune(spec, keep=2, label=label)
+        self.assertEqual(len(list(root.glob("catalog-*.db.gz"))), 2)
+        self.assertEqual(len(list(root.glob("immich-db-*.sql.gz"))), 2)
+        self.assertEqual(len(list(root.glob("immich-albums-*.json"))), 2)

@@ -34,6 +34,38 @@ STATIC_DIR = Path(__file__).parent / "static"
 _local = threading.local()
 
 
+def _all_backup_files(cfg) -> list[dict]:
+    """Every backup artifact on every reachable local device."""
+    from ..backups import BACKUP_DIR
+    from ..replicas import LocalDriver
+
+    out = []
+    for spec in cfg.replicas:
+        if spec.kind != "local":
+            continue
+        drv = LocalDriver(spec)
+        try:
+            if not drv.available():
+                continue
+        except Exception:
+            continue
+        root = Path(spec.root).expanduser() / BACKUP_DIR
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            if path.suffix == ".sha256" or not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            out.append({"replica": spec.name, "name": path.name,
+                        "size": stat.st_size, "mtime": stat.st_mtime,
+                        "verified": (path.with_suffix(path.suffix
+                                                      + ".sha256")).is_file()})
+    return out
+
+
 class AppState:
     """Holds the live config. Editing it from the UI swaps `cfg` and bumps
     `generation`, which each worker thread notices and reopens its catalog
@@ -253,6 +285,24 @@ class VaultHandler(BaseHTTPRequestHandler):
             return self._json({
                 "months": [dict(r) for r in cat.timeline()],
                 "undated": cat.undated_count(),
+            })
+
+        if name == "backups":
+            from .. import backups as bk
+            snaps = bk.available(self.cfg)
+            by_kind = {}
+            for label, pattern in (("catalog", "catalog-"),
+                                   ("immich-db", "immich-db-"),
+                                   ("immich-albums", "immich-albums-")):
+                items = [s for s in _all_backup_files(self.cfg)
+                         if s["name"].startswith(pattern)]
+                items.sort(key=lambda x: x["name"], reverse=True)
+                by_kind[label] = items
+            return self._json({
+                "age_days": bk.age_days(self.cfg),
+                "immich_configured": self.cfg.immich.enabled,
+                "keep": self.cfg.backup_keep,
+                "kinds": by_kind,
             })
 
         if name == "operations":

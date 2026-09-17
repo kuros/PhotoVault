@@ -35,7 +35,7 @@ services:
       TZ: ${TZ:-UTC}
     env_file: [.env]
     ports:
-      - 127.0.0.1:2283:2283      # loopback only; reach it over SSH if remote
+      - 2283:2283      # loopback only; reach it over SSH if remote
     depends_on: [redis, database]
     restart: unless-stopped
     healthcheck:

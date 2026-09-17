@@ -85,7 +85,7 @@ async function refreshStatus() {
   }
 
   renderDevices(s);
-  if (state.view === 'health') { renderHealth(s); renderPlan(); }
+  if (state.view === 'health') { renderHealth(s); renderPlan(); renderBackups(); }
   return s;
 }
 
@@ -253,6 +253,13 @@ function renderOp(op) {
     <div class="op__cmd" data-copy="${op.command}" title="Click to copy">${op.command}</div>
     <div class="op__foot">${last}${button}</div>
   </div>`;
+}
+
+function attachBackups() {
+  $('#backupNow').addEventListener('click', () => {
+    startJob('backup');
+    setTimeout(renderBackups, 3000);
+  });
 }
 
 function attachOperations() {
@@ -972,6 +979,54 @@ function attachSettings() {
   });
 }
 
+
+async function renderBackups() {
+  let b;
+  try { b = await api('backups'); } catch { return; }
+
+  const age = b.age_days;
+  const stale = age === null || age > 14;
+  $('#backupNote').innerHTML = age === null
+    ? '<span style="color:var(--bad)">Never backed up.</span> '
+      + 'Photos survive without this; your duplicate decisions, trash state '
+      + 'and Immich albums do not.'
+    : `Newest is ${age < 1 ? 'from today' : Math.floor(age) + ' days old'}`
+      + `${stale ? ' — worth running again' : ''}. Keeping the newest ${b.keep} `
+      + `of each on every connected device.`;
+  $('#backupNote').style.color = stale ? 'var(--warn)' : '';
+
+  const LABEL = {
+    'catalog': ['PhotoVault catalog', 'duplicate decisions and trash state'],
+    'immich-db': ['Immich database', 'albums, faces, favourites'],
+    'immich-albums': ['Album manifest', 'plain JSON — outlives Immich itself'],
+  };
+
+  $('#backupKinds').innerHTML = Object.entries(b.kinds).map(([kind, items]) => {
+    if (!items.length && kind.startsWith('immich') && !b.immich_configured) return '';
+    const [title, why] = LABEL[kind] || [kind, ''];
+    // Group by filename so one row shows which devices hold that snapshot.
+    const byName = new Map();
+    for (const it of items) {
+      if (!byName.has(it.name)) byName.set(it.name, { ...it, on: [] });
+      byName.get(it.name).on.push(it.replica);
+    }
+    const rows = [...byName.values()].slice(0, 4).map((it) => `
+      <div class="hrow" style="gap:10px">
+        <span class="hrow__label" style="width:auto;flex:1;font-variant-numeric:tabular-nums">
+          ${it.name.replace(/^(catalog|immich-db|immich-albums)-/, '')}</span>
+        <span class="muted">${bytes(it.size)}</span>
+        <span class="muted">${it.on.join(', ')}</span>
+        <span style="color:${it.verified ? 'var(--ok)' : 'var(--warn)'}">
+          ${it.verified ? 'checksummed' : 'no checksum'}</span>
+      </div>`).join('');
+    return `<div style="margin-bottom:14px">
+      <div style="font-weight:600;font-size:13px">${title}
+        <span class="muted" style="font-weight:400">— ${why}</span></div>
+      ${rows || '<p class="muted" style="font-size:12.5px">none yet</p>'}
+    </div>`;
+  }).join('');
+}
+
 /* ---------------------------------------------------------------- timeline */
 
 async function loadTimeline() {
@@ -1233,6 +1288,7 @@ function attach() {
   attachSelection();
   attachTrash();
   attachOperations();
+  attachBackups();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 

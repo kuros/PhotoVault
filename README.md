@@ -521,15 +521,30 @@ None of that can be reconstructed by reading the files. It's judgement, not data
 python3 -m photovault backup
 ```
 
-```
-catalog-20260917-035340.db.gz  2.5 MB  sha256 49a9eb2ffdb32308
-  copied      mac
-  copied      hdd1
-```
+Three artifacts go to `.photovault-backups/` on **every connected device**, each with a
+`.sha256` beside it, keeping the newest `backup_keep` (default 10) of each kind:
 
-A compressed snapshot goes to `.photovault-backups/` on every reachable device, with a
-`.sha256` beside it, keeping the newest `backup_keep` (default 10). `status` nags when
-the newest backup is over two weeks old.
+| Artifact | Holds | Survives |
+|---|---|---|
+| `catalog-*.db.gz` | duplicate decisions, trash state | anything |
+| `immich-db-*.sql.gz` | albums, faces, favourites, archive state | a `colima delete` |
+| `immich-albums-*.json` | album names and library paths, plain JSON | **Immich itself** |
+
+The last one matters most. A `pg_dump` only restores into a compatible Postgres *and* a
+compatible Immich schema — two years and a hundred releases later it may simply not
+apply. The manifest is a few kilobytes naming each album and the library paths of its
+photos, readable by any tool or by a human rebuilding albums by hand.
+
+The dump excludes data Immich regenerates — `geodata_places` alone is ~119 MB of static
+reverse-geocoding reference data, and the ML embeddings are re-derived by re-running the
+jobs. Schema is kept, only the rows are dropped, so a restore stays valid. In practice
+that took a real dump to 1.1 MB compressed.
+
+**A broken Immich never stops a photo backup.** If the API is unreachable or the
+containers are down, the catalog snapshot still completes and the failure is reported.
+
+`status` nags when the newest backup is over two weeks old, and the **Health** tab shows
+every artifact, which devices hold it, and whether it is checksummed.
 
 ```bash
 python3 -m photovault backup --list
@@ -918,9 +933,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-191 tests covering ingest, deduplication, replication, corruption repair, catalog
+199 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, catalog backup and restore, the operations catalogue, and the Immich integration against a stub server.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, catalog backup and restore, the operations catalogue, the Immich integration against a stub server, and Immich backup artifacts.
 
 ---
 
