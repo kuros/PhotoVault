@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .. import duplicates, ingest, sync, uploads, verify
+from .. import backups, duplicates, ingest, sync, uploads, verify
 from ..catalog import Catalog
 from ..config import Config
 
@@ -289,13 +289,30 @@ class JobRunner:
                        f"{st.duplicates} already in the library")
 
 
+    def _run_backup(self, job: Job, cat: Catalog, keep: int | None = None) -> None:
+        job.message = "snapshotting the catalog"
+        res = backups.run(self.cfg, keep=keep or self.cfg.backup_keep)
+        job.result = {"name": res.name, "size": res.size,
+                      "copied": len(res.copied), "pruned": res.pruned,
+                      "unreachable": len(res.unreachable)}
+        job.errors.extend(res.errors[:10])
+        for name in res.unreachable:
+            job.errors.append(f"{name}: not connected")
+        cat.log("backup", f"{res.name} -> {', '.join(res.copied) or 'nowhere'}")
+        job.message = (f"copied to {len(res.copied)} device"
+                       f"{'' if len(res.copied) == 1 else 's'}")
+        if not res.copied:
+            raise RuntimeError("no device was reachable to back up to")
+
+
 def _label(action: str, kwargs: dict) -> str:
     target = kwargs.get("replica") or kwargs.get("device")
     base = {"ingest": "Import photos", "sync": "Back up",
             "scrub": "Verify integrity", "reconcile": "Re-check devices",
             "dupscan": "Find duplicates",
             "dupapply": "Delete reviewed duplicates",
-            "upload_ingest": "Import uploaded photos"}.get(action, action)
+            "upload_ingest": "Import uploaded photos",
+            "backup": "Back up the catalog"}.get(action, action)
     if kwargs.get("force"):
         base += " (full)"
     if kwargs.get("dry_run"):

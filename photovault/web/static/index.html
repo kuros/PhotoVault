@@ -25,6 +25,7 @@
     <button class="tab" data-view="activity" role="tab">Activity</button>
     <button class="tab" data-view="duplicates" role="tab">Duplicates</button>
     <button class="tab" data-view="trash" role="tab">Trash</button>
+    <button class="tab" data-view="operations" role="tab">Run</button>
     <button class="tab" data-view="settings" role="tab">Settings</button>
   </nav>
 
@@ -181,6 +182,21 @@
       <div id="trashBanner" class="banner" hidden></div>
       <p class="muted panel__sub" id="trashNote"></p>
       <div id="trashGrid" class="grid"></div>
+    </div>
+
+    <!-- OPERATIONS -->
+    <div class="view" data-view="operations">
+      <div class="viewbar">
+        <h2>Run</h2>
+        <div class="viewbar__right">
+          <span id="opsDevices" class="muted"></span>
+        </div>
+      </div>
+      <p class="muted panel__sub">
+        Everything PhotoVault can do, what each one touches, and when to reach for
+        it. Operations that can remove data are marked and are not run from here.
+      </p>
+      <div id="opsGroups"></div>
     </div>
 
     <!-- SETTINGS -->

@@ -945,6 +945,9 @@ def cmd_backup(args) -> int:
         return 0
 
     res = backups.run(cfg, keep=args.keep or cfg.backup_keep)
+    cat = Catalog(cfg.catalog_path)
+    cat.log("backup", f"{res.name} -> {', '.join(res.copied) or 'nowhere'}")
+    cat.close()
     print(f"{BOLD}{res.name}{RESET}  {human(res.size)}  "
           f"{DIM}sha256 {res.digest[:16]}{RESET}")
     for name in res.copied:

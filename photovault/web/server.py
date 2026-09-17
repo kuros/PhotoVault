@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .. import config as configmod
-from .. import duplicates, trash, uploads
+from .. import duplicates, operations, trash, uploads
 from .. import health, placement, sync
 from ..catalog import Catalog
 from ..config import Config
@@ -251,6 +251,18 @@ class VaultHandler(BaseHTTPRequestHandler):
             return self._json({
                 "months": [dict(r) for r in cat.timeline()],
                 "undated": cat.undated_count(),
+            })
+
+        if name == "operations":
+            from ..sync import available_replicas
+            devices = [{"name": n, "reachable": ok,
+                        "offline": self.cfg.replica(n).offline}
+                       for n, _d, ok in available_replicas(self.cfg)]
+            return self._json({
+                "operations": operations.describe(self.cfg, cat),
+                "devices": devices,
+                "trash_days": self.cfg.trash_days,
+                "scrub_days": self.cfg.scrub_days,
             })
 
         if name == "trash":

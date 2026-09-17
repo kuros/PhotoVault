@@ -716,3 +716,37 @@ Same reasoning will apply to Immich's pg_dump and the album manifest when those 
 which is **not** an `OSError` — so a damaged backup produced a traceback instead of
 `False`. The function whose entire job is detecting damage was the one that crashed on
 finding it. Caught by deliberately corrupting a snapshot rather than by reading the code.
+
+
+---
+
+## Decision 17: the operation describes itself
+
+The UI had accumulated three unexplained buttons — Import, Back up, Verify — with nothing
+saying what they touched or when to use them. Meanwhile the CLI had grown to twenty-odd
+commands, several of which delete things. A button whose consequences you have to
+remember is one you eventually press at the wrong moment.
+
+`operations.py` holds one described entry per operation: what it does, when you would
+want it, its risk level, the equivalent command, which devices it needs, and which log
+events date its last run. The UI renders that catalogue rather than hard-coding its own
+copy of the explanations, so the two cannot drift.
+
+Three rules fell out of writing the descriptions down, and each of them is really a
+statement about trust:
+
+- **Destructive operations get no button.** Emptying the trash and applying duplicate
+  deletions need per-item judgement that a single click cannot express. They are
+  documented, with the command and the reason for the caution, and the duplicate one
+  points at the tab where the decision is actually made.
+- **Prerequisites are shown before the attempt, not after.** Purge requires every device
+  connected; the card is disabled and names the missing drive rather than letting you
+  press it and read an error.
+- **Last-run is derived from the event log, not tracked separately.** Both the CLI and the
+  UI write the same events, so "ran today" is true regardless of how you ran it — no
+  second source of truth to keep honest.
+
+> **The general lesson:** if you cannot write down when an operation should be used and
+> what it costs, the operation is not finished. Being unable to describe `purge` without
+> three sentences of caveat is the design telling you it deserves a confirmation, not a
+> button.

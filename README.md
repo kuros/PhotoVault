@@ -342,6 +342,40 @@ tells whoever finds it not to mistake it for a full backup.
 
 ---
 
+## The Run tab
+
+```bash
+python3 -m photovault ui     # → Run
+```
+
+Every operation PhotoVault can perform, grouped by why you would reach for it, each
+card saying what it touches, when to run it, the caveat worth knowing, and the
+equivalent CLI command (click to copy). It also shows when you last ran it, and which
+devices are connected right now.
+
+| Group | Contains |
+|---|---|
+| **Routine** | Import photos · Back up to every device · Back up the catalog |
+| **Maintenance** | Verify stored files · Find duplicates · Re-check devices |
+| **Clean-up** | Empty the trash · Delete reviewed duplicates |
+| **Recovery** | Restore the catalog · Rebuild from the files · Copy everything to a folder |
+
+Each card is marked **safe** (reads, or only ever adds), **careful** (slow, or writes a
+lot) or **destructive** (can remove data).
+
+**Destructive operations have no Run button.** Emptying the trash and deleting reviewed
+duplicates need per-item judgement a single click cannot capture, so they are documented
+with their command and the reason for the caution. Deleting duplicates sends you to the
+Duplicates tab, where the choice actually gets made.
+
+Operations that require every device — purging, in particular — are **disabled with the
+reason shown** when a drive is missing, rather than failing once you press them.
+
+The descriptions live in `photovault/operations.py`, so the CLI help and the UI cannot
+drift apart.
+
+---
+
 ## Configuring from the UI
 
 Everything below can be set in the browser instead of editing TOML:
@@ -884,9 +918,9 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-164 tests covering ingest, deduplication, replication, corruption repair, catalog
+168 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
-path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, and catalog backup and restore.
+path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, catalog backup and restore, and the operations catalogue.
 
 ---
 

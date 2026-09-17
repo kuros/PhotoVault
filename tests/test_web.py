@@ -348,3 +348,55 @@ class TestUploadApi(WebTestCase):
         res = self.post("/api/uploads/discard", {})
         self.assertEqual(res["discarded"], 1)
         self.assertEqual(self.get("/api/uploads")["files"], 0)
+
+
+class TestOperationsApi(WebTestCase):
+    """The Run tab renders from this, so it is the single place the
+    descriptions and safety levels live."""
+
+    def test_every_operation_is_described(self):
+        ops = self.get("/api/operations")["operations"]
+        self.assertGreaterEqual(len(ops), 10)
+        for op in ops:
+            with self.subTest(op=op["id"]):
+                self.assertTrue(op["title"])
+                self.assertTrue(op["what"], "must say what it does")
+                self.assertTrue(op["when"], "must say when to run it")
+                self.assertTrue(op["command"], "must show the CLI equivalent")
+                self.assertIn(op["risk"], ("safe", "careful", "destructive"))
+
+    def test_destructive_operations_are_not_runnable_from_the_ui(self):
+        """Emptying the trash and deleting duplicates need judgement the button
+        cannot capture, so they are documented rather than offered."""
+        ops = self.get("/api/operations")["operations"]
+        for op in ops:
+            if op["risk"] == "destructive":
+                self.assertIsNone(op["action"],
+                                  f"{op['id']} must not be a one-click action")
+
+    def test_last_run_is_derived_from_the_event_log(self):
+        ops = {o["id"]: o for o in self.get("/api/operations")["operations"]}
+        self.assertIsNone(ops["backup"]["last_run"])
+
+        self.post("/api/jobs", {"action": "backup"})
+        self.wait_idle()
+
+        ops = {o["id"]: o for o in self.get("/api/operations")["operations"]}
+        self.assertIsNotNone(ops["backup"]["last_run"])
+        self.assertLess(ops["backup"]["days_since"], 1)
+
+    def test_operations_needing_every_device_are_blocked_when_one_is_absent(self):
+        """Purge is refused with a drive in a drawer, and the UI should say so
+        before the user tries rather than after."""
+        body = self.get("/api/config")
+        body["config"]["replica"].append({
+            "name": "offsite", "kind": "local",
+            "root": "/Volumes/DefinitelyNotMounted/lib",
+            "offline": True, "mode": "full", "capacity": "auto"})
+        self.post("/api/config", {"config": body["config"]})
+
+        ops = {o["id"]: o for o in self.get("/api/operations")["operations"]}
+        self.assertFalse(ops["purge"]["ready"])
+        self.assertIn("offsite", ops["purge"]["blocked_by"])
+        # An operation that tolerates absent devices stays available.
+        self.assertTrue(ops["sync"]["ready"])

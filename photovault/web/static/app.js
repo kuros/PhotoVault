@@ -22,7 +22,8 @@ const state = {
 
 const PAGE_TITLES = { photos: 'Photos', health: 'Health',
                       activity: 'Activity', duplicates: 'Duplicates',
-                      trash: 'Trash', settings: 'Settings' };
+                      trash: 'Trash', operations: 'Run',
+                      settings: 'Settings' };
 const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June',
                 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -189,6 +190,90 @@ async function renderPlan() {
 
 
 
+
+
+/* -------------------------------------------------------------- operations */
+
+const GROUP_ORDER = ['Routine', 'Maintenance', 'Clean-up', 'Recovery'];
+
+function sinceLabel(days, last) {
+  if (days === null || days === undefined) return 'never run';
+  if (days < 1) return 'ran today';
+  if (days < 2) return 'ran yesterday';
+  return `ran ${Math.floor(days)} days ago`;
+}
+
+async function loadOperations() {
+  let data;
+  try { data = await api('operations'); } catch (err) { return toast(err.message); }
+
+  const missing = data.devices.filter((d) => !d.reachable);
+  $('#opsDevices').textContent = missing.length
+    ? `${missing.map((d) => d.name).join(', ')} not connected`
+    : `all ${data.devices.length} devices connected`;
+
+  const groups = new Map(GROUP_ORDER.map((g) => [g, []]));
+  for (const op of data.operations) {
+    if (!groups.has(op.group)) groups.set(op.group, []);
+    groups.get(op.group).push(op);
+  }
+
+  $('#opsGroups').innerHTML = [...groups].filter(([, ops]) => ops.length)
+    .map(([group, ops]) => `
+      <div class="opgroup">
+        <div class="opgroup__title">${group}</div>
+        <div class="ops">${ops.map(renderOp).join('')}</div>
+      </div>`).join('');
+}
+
+function renderOp(op) {
+  // Stale routine work is worth flagging where the user is already looking.
+  const stale = op.days_since !== null && op.days_since > 30
+    && op.group !== 'Recovery';
+  const last = `<span class="op__last"${stale ? ' style="color:var(--warn)"' : ''}>`
+    + `${sinceLabel(op.days_since)}</span>`;
+
+  const button = op.action
+    ? `<button class="btn btn--sm btn--primary" data-op="${op.action}"
+               ${op.ready ? '' : 'disabled'}>Run</button>`
+    : '';
+
+  return `<div class="op op--${op.risk}">
+    <div class="op__head">
+      <h4>${op.title}</h4>
+      <span class="op__risk risk-${op.risk}">${op.risk}</span>
+    </div>
+    <div class="op__what">${op.what}</div>
+    <div class="op__when"><b>When:</b> ${op.when}</div>
+    ${op.note ? `<div class="op__note">${op.note}</div>` : ''}
+    ${op.blocked_by.length
+      ? `<div class="op__blocked">Not available: ${op.blocked_by.join(', ')}
+           ${op.blocked_by.length === 1 ? 'is' : 'are'} not connected.</div>`
+      : ''}
+    <div class="op__cmd" data-copy="${op.command}" title="Click to copy">${op.command}</div>
+    <div class="op__foot">${last}${button}</div>
+  </div>`;
+}
+
+function attachOperations() {
+  $('#opsGroups').addEventListener('click', async (e) => {
+    const copy = e.target.closest('[data-copy]');
+    if (copy) {
+      try {
+        await navigator.clipboard.writeText(copy.dataset.copy);
+        toast('Command copied');
+      } catch {
+        toast(copy.dataset.copy);   // clipboard needs a secure context
+      }
+      return;
+    }
+    const run = e.target.closest('[data-op]');
+    if (run && !run.disabled) {
+      startJob(run.dataset.op);
+      setTimeout(loadOperations, 1200);
+    }
+  });
+}
 
 /* --------------------------------------------------------- select & delete */
 
@@ -1092,6 +1177,7 @@ function switchView(view) {
   if (view === 'activity') { refreshJobs(); loadEvents(); }
   if (view === 'duplicates') loadDuplicates();
   if (view === 'trash') loadTrash();
+  if (view === 'operations') loadOperations();
   if (view === 'settings') loadSettings().catch((e) => banner(e.message, 'bad'));
 }
 
@@ -1101,6 +1187,7 @@ function attach() {
   attachUploads();
   attachSelection();
   attachTrash();
+  attachOperations();
   $$('.tab').forEach((t) =>
     t.addEventListener('click', () => switchView(t.dataset.view)));
 
