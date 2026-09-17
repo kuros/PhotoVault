@@ -22,6 +22,77 @@ overwrites it. That's the whole system.
 
 ---
 
+## Before you start
+
+PhotoVault has **no third-party dependencies**. Everything below beyond Python is
+either already on macOS or entirely optional.
+
+### What you actually need
+
+| | Why | Check |
+|---|---|---|
+| **Python 3.11 or newer** | the config parser needs `tomllib` | `python3 -V` |
+| **Two storage locations** | one copy is not a backup | — |
+| **Disk space** | your library, once per device | `df -h` |
+
+> **The macOS trap:** the `python3` that ships with macOS is **3.9.6**, which is too old.
+> Check with `python3 -V`. If it says 3.9 or 3.10, run `brew install python` and make
+> sure it comes first on your `PATH`. PhotoVault checks this itself and tells you what
+> to do rather than failing with an import error.
+
+`rsync` and `ssh` are already on macOS; you only need them for a replica on another
+machine. Nothing needs to be compiled, and nothing needs `pip install` to work.
+
+### The smallest setup that is actually useful
+
+**Your Mac plus one external drive.** That is two independent copies, verified by
+hashes, with automatic repair if either rots — genuinely better than most people's photo
+backups, and it takes about five minutes:
+
+```bash
+python3 -m photovault setup     # pick the drive, answer three questions
+python3 -m photovault scan      # reads everything, changes nothing
+python3 -m photovault ingest
+python3 -m photovault sync --all
+python3 -m photovault status    # four OK lines means you are protected
+```
+
+Add a third device later by editing one section of the config — everything else keeps
+working while you do.
+
+### How much space
+
+Roughly **your library size × the number of devices**. There is no compression, and
+nothing is stored twice on the same device — identical photos are collapsed on import.
+
+```
+400 GB library, 3 copies  →  ~400 GB free needed on each device
+```
+
+`photovault scan` tells you the real number before anything is copied.
+
+### Optional extras, and what each one buys
+
+None of these are needed to back up photos safely. Add them when you want the feature.
+
+| Add | Get | Without it |
+|---|---|---|
+| `pip install Pillow` | faster thumbnails, duplicate detection on any OS | macOS falls back to built-in `sips`; Linux has no thumbnails |
+| `pip install blake3` | roughly 5× faster hashing on large libraries | SHA-256, still fine |
+| Docker + [Immich](immich/README.md) | phone apps, search, faces, albums | browse in PhotoVault's own web UI |
+| `brew install android-platform-tools` | import straight from Android over USB | copy files off the phone yourself |
+| An SSH server on a second machine | a replica on your other computer | use a second external drive instead |
+
+### What PhotoVault will never do
+
+Worth knowing before you trust it with anything: it **never writes to your source
+folders**. It copies out of them and leaves them exactly as they were. The only
+exceptions are ones you switch on explicitly and name in the config — clearing an inbox
+after import, emptying the trash, removing duplicates you reviewed — and each of those
+re-reads and re-hashes enough copies before deleting anything.
+
+---
+
 ## Quick start
 
 ```bash
@@ -941,8 +1012,5 @@ path-traversal defence, multi-drive identity safety, sharded placement, the dele
 
 ## Requirements
 
-Python 3.11+ and `rsync` (both already on macOS). No other dependencies — the web
-UI is plain HTML, CSS and JavaScript served by Python's standard library, with no
-build step and nothing to install. Optionally
-`pip install blake3` for roughly 5x faster hashing on large libraries — PhotoVault
-detects it automatically.
+See [Before you start](#before-you-start). In short: Python 3.11+, and two places to put
+photos. Everything else is optional.
