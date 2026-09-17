@@ -750,3 +750,36 @@ statement about trust:
 > what it costs, the operation is not finished. Being unable to describe `purge` without
 > three sentences of caveat is the design telling you it deserves a confirmation, not a
 > button.
+
+
+---
+
+## Decision 18: one folder, one writer
+
+Immich and PhotoVault share a single photo tree. That works, and needs no hardlinks or
+clever storage tricks, because of one constraint: **exactly one system writes to it.**
+
+PhotoVault writes. Immich mounts the same directory read-only and indexes it as an
+External Library. The `:ro` is load-bearing — it makes "Immich will not delete your
+archive" a property of the mount rather than a promise about behaviour.
+
+The temptation is to let Immich's mobile app upload too, since it is the nicer
+experience. That is exactly what breaks the arrangement: managed uploads land in
+Immich's own storage, External Libraries are read-only by design, and so a photo sent
+through the app exists twice — once where Immich put it, once where PhotoVault imported
+it to. The duplication is not a bug to fix but a consequence of having two writers.
+
+The reverse arrangement is worse. Pointing PhotoVault's primary at Immich's managed
+library means `reconcile` sees files Immich deleted as missing and pushes them back,
+fighting Immich's own deletions, while `ingest` writes PhotoVault-named files into a
+directory whose contents Immich's database claims to know.
+
+> **The general lesson:** shared mutable state between two systems that each maintain
+> their own index is not a storage problem, it is a consistency problem, and no amount
+> of deduplication solves it. Decide which one owns the bytes and make the other's
+> access read-only at the filesystem level, where it cannot be forgotten.
+
+What this costs is the Immich uploader, and the honest accounting is that it costs less
+than it appears: `photovault reclaim` already does the phone-clearing job on stricter
+evidence than Immich's own "free up space", which releases a photo once it reaches the
+Immich server — one copy, on one drive, never verified.

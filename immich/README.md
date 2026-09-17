@@ -5,20 +5,60 @@ albums. PhotoVault is the archival layer: replication across drives, integrity
 scrubbing, disaster recovery. They do not overlap — Immich has no multi-drive
 replication or bitrot detection, and its own backup story is "back this up yourself".
 
-## The important bit: your existing library is not copied
+## One folder, one writer
 
-Your 57 GB archive stays exactly where it is. Immich indexes it as a **read-only
-External Library**, so there is no second copy and Immich physically cannot delete
-your photos — the `:ro` on the mount makes that impossible, not merely discouraged.
+Both systems share a single photo tree. The rule that makes that safe is that
+**exactly one of them writes to it**:
 
 ```
-~/PhotoVault/library         ← 57 GB, PhotoVault owns it, Immich reads it
-~/PhotoVault-immich/upload   ← thumbnails + new phone uploads (small)
+              ~/PhotoVault/library          ← the only photo tree
+                   ↑ writes                      ↓ reads (:ro)
+               PhotoVault                     Immich (External Library)
+```
+
+Immich indexes your library in place as a read-only External Library. There is no
+second copy, no hardlinks, and the `:ro` mount means Immich physically *cannot*
+delete your archive — a property, not a policy.
+
+```
+~/PhotoVault/library         ← every photo, PhotoVault owns it
+~/PhotoVault-immich/upload   ← thumbnails only (see below)
 ~/PhotoVault-immich/db       ← Postgres
 ```
 
 Keep `db` on an always-available disk. Immich cannot start without its database, so
 never put it on a drive you unplug.
+
+### Do not upload through the Immich mobile app
+
+This is the one thing that breaks the single-copy property. Managed uploads land in
+Immich's own storage, and External Libraries are read-only by design, so you cannot
+upload *into* one. A photo sent through the app would exist twice: once in Immich's
+upload tree and again in your library after PhotoVault imported it.
+
+Bring phone photos in through PhotoVault instead — Image Capture on iOS, `adb` on
+Android, or any folder you point a source at. Immich's nightly external scan picks
+them up.
+
+```
+iPhone  ──Image Capture──┐
+Android ──adb────────────┤→ inbox → photovault import → ~/PhotoVault/library
+                                                              ↓
+                                          Immich external scan → browse, search, faces
+```
+
+You give up the Immich app's uploader. You do **not** give up freeing space on your
+phone: `photovault reclaim` does that job on stricter evidence than Immich's "free up
+space", which releases a photo once it reaches the Immich server — one copy, on one
+drive, never scrubbed.
+
+### Why not the other way round
+
+Pointing PhotoVault's primary at Immich's managed library would put two writers on one
+tree. `reconcile` would treat files Immich deleted as missing and push them back,
+fighting Immich's own deletions, while `ingest` dropped PhotoVault-named files into a
+directory Immich's database believes it knows the contents of. That is the
+configuration the `:ro` mount exists to prevent.
 
 ---
 
@@ -57,47 +97,43 @@ nothing.
 Then **Scan** it. Immich reads EXIF, builds thumbnails and runs face detection —
 expect a while for 7,875 photos, and the ML container will use significant CPU.
 
-## 5. Install the mobile apps
+## 5. Install the mobile apps — for viewing
 
 Immich for [iOS](https://apps.apple.com/app/id1613945652) and
 [Android](https://play.google.com/store/apps/details?id=app.alextran.immich). Point
 them at your Mac's LAN address, e.g. `http://192.168.1.x:2283`.
 
-Set backup to **manual/selective** rather than automatic — you want uploads when you
-decide to sync, not continuously.
+**Leave backup switched off.** See "Do not upload through the Immich mobile app"
+above — uploading is what would give you two copies of every new photo. Use the apps
+to browse and search your archive from the sofa.
 
-## 6. Tell PhotoVault about Immich's uploads
+## 6. Bring new photos in through PhotoVault
 
-New photos from your phone land in Immich's own storage, not your archive. Add it as
-a PhotoVault source — in the UI under **Settings → Sources**, or in `config.toml`:
-
-```toml
-[[source]]
-device = "immich"
-path = "~/PhotoVault-immich/upload/library"
+```bash
+photovault import          # from your configured sources
+photovault reclaim         # what is provably archived and safe to delete
 ```
 
-Leave `clear_after_import` **off**. Immich owns those files and deleting them behind
-its back corrupts its database; you free space through Immich itself.
+Then trigger an Immich scan (Administration → External Libraries → Scan) or wait for
+the nightly job, and the new photos appear in Immich too.
 
 ---
 
 ## The monthly routine
 
 ```bash
-# plug in the backup drive, open Immich on your phones, upload
+# plug in the backup drive; copy photos off the phone (Image Capture / adb)
 cd immich && docker compose up -d
 photovault import            # pull new photos in, replicate everywhere
 photovault status            # must show four OK lines
 photovault backup            # snapshot the catalog to every device
-photovault reclaim immich    # what is provably archived?
-# only now: Immich app → Utilities → Free up space
+photovault reclaim           # what is provably archived and safe to delete
+# Immich: Administration → External Libraries → Scan (or wait for the nightly job)
 ```
 
-**The order matters.** Immich's "free up space" deletes from your phone once an asset
-reaches the Immich *server* — one copy, on one drive, unscrubbed. `photovault reclaim`
-tells you which assets have `min_copies` copies that were re-read and re-hashed, so
-step 5 is gated on evidence rather than assumption.
+**The order matters.** Nothing leaves your phone until `photovault reclaim` confirms
+`min_copies` copies that were re-read and re-hashed. That is the whole point of doing
+the import through PhotoVault rather than through Immich.
 
 ---
 
