@@ -31,7 +31,8 @@ services:
       # Immich physically cannot delete your archive, even from its own UI.
       # The container path is what you type into Immich, not the host path.
       - ${PHOTOVAULT_LIBRARY}:/mnt/photovault:ro
-      - /etc/localtime:/etc/localtime:ro
+    environment:
+      TZ: ${TZ:-UTC}
     env_file: [.env]
     ports:
       - 127.0.0.1:2283:2283      # loopback only; reach it over SSH if remote
@@ -45,6 +46,8 @@ services:
     image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION}
     volumes:
       - model-cache:/cache
+    environment:
+      TZ: ${TZ:-UTC}
     env_file: [.env]
     restart: unless-stopped
 
@@ -63,9 +66,19 @@ services:
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_DATABASE_NAME}
       POSTGRES_INITDB_ARGS: '--data-checksums'
+      TZ: ${TZ:-UTC}
     volumes:
-      - ${DB_DATA_LOCATION}:/var/lib/postgresql/data
+      # A named Docker volume, NOT a host bind mount. Immich's own guidance is
+      # that the database "should ideally use local SSD storage, and never a
+      # network share of any kind" - and on Colima a host mount is exactly that
+      # (sshfs, or virtiofs at best). A named volume lives on the VM's own ext4
+      # disk, which is the local SSD Postgres wants.
+      #
+      # The trade: `colima delete` destroys it. That is what pg_dump backups are
+      # for - and the photos were never in here anyway.
+      - immich-db:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
   model-cache:
+  immich-db:
