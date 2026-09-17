@@ -970,7 +970,16 @@ def cmd_backup(args) -> int:
 def cmd_redate(args) -> int:
     """Re-read capture dates from the files and move anything filed wrongly."""
     cfg, cat = _load(args)
-    rep = redate.find(cfg, cat, limit=args.limit)
+    if args.__dict__.get("from_folder"):
+        folder = Path(args.from_folder).expanduser()
+        if not folder.is_dir():
+            print(f"{RED}{folder} is not a folder{RESET}")
+            cat.close()
+            return 1
+        print(f"Matching {BOLD}{folder}{RESET} against the library by content...")
+        rep = redate.find_from_originals(cfg, cat, folder, limit=args.limit)
+    else:
+        rep = redate.find(cfg, cat, limit=args.limit)
     if rep.blocked_by:
         print(f"{RED}{', '.join(rep.blocked_by)} not connected{RESET}")
         cat.close()
@@ -1189,6 +1198,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("redate",
                        help="re-read capture dates and re-file wrongly dated photos")
     s.add_argument("--apply", action="store_true", help="actually move them")
+    s.add_argument("--from", dest="from_folder", metavar="FOLDER",
+                   help="recover dates from a folder of original files, "
+                        "matched by content — for scans and screenshots that "
+                        "never had embedded metadata")
     s.add_argument("--limit", type=int)
     s.add_argument("--show", type=int, default=10)
     s.set_defaults(func=cmd_redate)

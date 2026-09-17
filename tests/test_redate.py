@@ -213,3 +213,101 @@ class TestRedate(RedateTestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRedateFromOriginals(RedateTestCase):
+    """Some photos never had an embedded date — scans and screenshots. If the
+    file's own timestamp was lost on the way in, the stored copy cannot be
+    repaired from itself: the information is not in the bytes. It is still in
+    the originals."""
+
+    def stage_undated(self, n: int = 3) -> Path:
+        """Files with no metadata at all, but meaningful timestamps."""
+        import os
+        from make_fixtures import jpeg_with_exif
+
+        originals = self.tmp / "originals"
+        originals.mkdir()
+        for i in range(n):
+            p = originals / f"scan_{i}.jpg"
+            p.write_bytes(jpeg_with_exif(None, f"scanned-{i}".encode() * 80))
+            when = datetime(2014, 6, 15 + i, 12, 0, 0).timestamp()
+            os.utime(p, (when, when))
+        return originals
+
+    def import_losing_timestamps(self, originals: Path) -> None:
+        """What a browser upload used to do: rewrite the file with a fresh
+        mtime, destroying the only date it had."""
+        import os
+        import shutil as sh
+
+        inbox = self.src
+        for p in originals.iterdir():
+            dest = inbox / p.name
+            sh.copyfile(p, dest)                      # copyfile, not copy2
+            os.utime(dest, (datetime.now().timestamp(),) * 2)
+        ingest.ingest_source(self.cfg, self.cat, "phone", inbox)
+        sync.push(self.cfg, self.cat, "hdd")
+
+    def test_dates_are_recovered_from_the_original_files(self):
+        originals = self.stage_undated(3)
+        self.import_losing_timestamps(originals)
+
+        for asset in self.cat.all_assets():
+            self.assertTrue(asset["rel_path"].startswith(
+                f"{datetime.now().year}/"), "should be misfiled under today")
+
+        rep = redate.find_from_originals(self.cfg, self.cat, originals)
+        self.assertEqual(len(rep.candidates), 3)
+        redate.apply(self.cfg, self.cat, rep, dry_run=False)
+
+        for asset in self.cat.all_assets():
+            self.assertTrue(asset["rel_path"].startswith("2014/06/"),
+                            asset["rel_path"])
+            for replica in ("mac", "hdd"):
+                self.assertTrue((self.tmp / replica / asset["rel_path"]).is_file())
+
+    def test_matching_is_by_content_not_by_name(self):
+        """A file that merely looks similar must never contribute its date to
+        the wrong photo."""
+        from make_fixtures import jpeg_with_exif
+        import os
+
+        originals = self.stage_undated(2)
+        self.import_losing_timestamps(originals)
+
+        impostor = originals / "scan_0_copy.jpg"       # same name shape, other bytes
+        impostor.write_bytes(jpeg_with_exif(None, b"completely different" * 90))
+        when = datetime(1999, 1, 1, 12, 0, 0).timestamp()
+        os.utime(impostor, (when, when))
+
+        rep = redate.find_from_originals(self.cfg, self.cat, originals)
+        self.assertEqual(len(rep.candidates), 2, "the impostor must not match")
+        self.assertTrue(all(c.new_when.year == 2014 for c in rep.candidates))
+
+    def test_an_implausible_timestamp_is_ignored(self):
+        import os
+
+        originals = self.stage_undated(2)
+        self.import_losing_timestamps(originals)
+        for p in originals.iterdir():
+            os.utime(p, (0, 0))          # epoch zero — not a real capture date
+
+        rep = redate.find_from_originals(self.cfg, self.cat, originals)
+        self.assertEqual(rep.candidates, [])
+
+    def test_embedded_metadata_still_wins_over_the_file_timestamp(self):
+        import os
+        from make_fixtures import jpeg_with_exif
+
+        originals = self.tmp / "mixed"
+        originals.mkdir()
+        p = originals / "photo.jpg"
+        p.write_bytes(jpeg_with_exif("2009:05:06 07:08:09", b"x" * 300))
+        os.utime(p, (datetime(2014, 6, 15).timestamp(),) * 2)
+        self.import_losing_timestamps(originals)
+
+        rep = redate.find_from_originals(self.cfg, self.cat, originals)
+        # There is real metadata, so it is preferred over the 2014 timestamp.
+        self.assertTrue(all(c.source == "exif" for c in rep.candidates))
+        self.assertTrue(all(c.new_when.year == 2009 for c in rep.candidates))

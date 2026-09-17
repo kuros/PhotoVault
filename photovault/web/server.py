@@ -422,12 +422,16 @@ class VaultHandler(BaseHTTPRequestHandler):
         try:
             raw_path = unquote(raw_path)
             length = int(self.headers.get("Content-Length") or 0)
+            # The browser knows when the file was last written; without it a
+            # scan or screenshot has no date at all and lands under "today".
+            modified_ms = int(self.headers.get("X-PV-Modified") or 0) or None
         except ValueError:
             return self._json({"error": "bad headers"}, 400)
         if length <= 0:
             return self._json({"error": "empty upload"}, 400)
 
-        result = uploads.accept(self.cfg, raw_path, self.rfile, length)
+        result = uploads.accept(self.cfg, raw_path, self.rfile, length,
+                                modified_ms=modified_ms)
         if not result.stored:
             # Drain whatever is left so the connection stays usable.
             remaining = length

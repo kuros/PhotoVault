@@ -94,8 +94,16 @@ class UploadResult:
     reason: str = ""
 
 
-def accept(cfg: Config, rel_path: str, stream, length: int) -> UploadResult:
-    """Stream one uploaded file to staging. Never buffers the whole file."""
+def accept(cfg: Config, rel_path: str, stream, length: int,
+           modified_ms: int | None = None) -> UploadResult:
+    """Stream one uploaded file to staging. Never buffers the whole file.
+
+    `modified_ms` is the browser's File.lastModified. Carrying it across matters
+    more than it sounds: a scanned document or a screenshot has no embedded
+    capture date at all, so the file's timestamp is the *only* date that exists.
+    Writing the upload with a fresh mtime destroys it, and the photo is then
+    filed under the day it was uploaded.
+    """
     safe = safe_relative_path(rel_path)
     if safe is None:
         return UploadResult(reason="unsafe path")
@@ -128,10 +136,28 @@ def accept(cfg: Config, rel_path: str, stream, length: int) -> UploadResult:
             tmp.unlink(missing_ok=True)
             return UploadResult(reason="upload was truncated")
         tmp.replace(dest)
+        _apply_modified(dest, modified_ms)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         return UploadResult(reason=str(exc))
     return UploadResult(stored=True, path=str(safe), size=written)
+
+
+def _apply_modified(path: Path, modified_ms: int | None) -> None:
+    """Restore the original modification time, if the client sent one."""
+    if not modified_ms:
+        return
+    import os
+    from datetime import datetime
+
+    try:
+        seconds = modified_ms / 1000
+        # Reject nonsense rather than stamping an absurd date onto the file.
+        year = datetime.fromtimestamp(seconds).year
+        if 1970 < year <= datetime.now().year + 1:
+            os.utime(path, (seconds, seconds))
+    except (OSError, ValueError, OverflowError, OSError):
+        pass
 
 
 @dataclass

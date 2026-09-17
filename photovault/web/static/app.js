@@ -484,6 +484,9 @@ async function runUploads() {
         const res = await fetch('/api/upload', {
           method: 'POST',
           headers: { 'X-PV-Path': encodeURIComponent(item.path),
+                     // The file's own timestamp. For a scan or screenshot with
+                     // no embedded metadata this is the only date there is.
+                     'X-PV-Modified': String(item.file.lastModified || 0),
                      'Content-Type': 'application/octet-stream' },
           body: item.file,
         });

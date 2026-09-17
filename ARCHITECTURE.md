@@ -967,3 +967,34 @@ repair path deliberately uses a narrower reader that consults embedded metadata 
 It also requires every device connected, for the same reason purge does: a rename
 recorded in the catalog but not performed on an absent drive leaves that drive holding a
 file nobody will ever look for again.
+
+
+---
+
+## Decision 23: some dates only exist outside the file
+
+The HEIC fix was a parser bug. This one is not: a scanned document carries no embedded
+capture date at all, so the file's own timestamp is the **only** date that ever existed.
+
+The browser upload path was destroying it. `File.lastModified` was sitting unread in the
+`File` object while the server wrote the staged copy with a fresh mtime. For a photo with
+EXIF that is harmless — the fallback never runs. For 318 scanned certificates it meant
+every one was filed under the day it was uploaded, and the original date was simply gone.
+
+> **The general lesson:** when a value has several possible sources, the weakest one is
+> load-bearing exactly when the others are absent — which is the case you are least
+> likely to have tested. The mtime fallback looked like a nicety until it was the only
+> thing standing between a scan and a wrong answer.
+
+Two fixes, mirroring the Immich one:
+
+- The browser sends `X-PV-Modified` and the server restores it on the staged file,
+  rejecting implausible values rather than stamping them on.
+- `photovault redate --from <folder>` recovers what was already lost, matching originals
+  to stored photos **by content hash**. A file that merely looks similar can never hand
+  its date to the wrong photo, and embedded metadata still wins where it exists.
+
+The `--from` path is the more interesting one, because it admits something the rest of
+the system does not have to: *this cannot be repaired from the archive alone.* Content
+addressing is what makes the outside information safe to accept — the join is exact
+rather than a guess about filenames.

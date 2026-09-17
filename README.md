@@ -934,11 +934,30 @@ library/2024/03/20240315-143022_a1b2c3d4e5.jpg
 
 Two deliberate choices:
 
-If a photo's date is ever read wrongly — metadata PhotoVault could not parse, so it fell
-back to the file's timestamp — `photovault redate` re-reads the files, corrects the
-dates, and moves the photos to where they belong on every device. It trusts only the
-photo's own embedded metadata, never the filename, which PhotoVault wrote from the bad
-date in the first place.
+### When the date comes out wrong
+
+```bash
+python3 -m photovault redate              # preview
+python3 -m photovault redate --apply
+```
+
+Re-reads the files, corrects the dates, and moves the photos to where they belong on
+every device. It trusts only the photo's own embedded metadata — never the filename,
+which PhotoVault wrote from the bad date in the first place.
+
+Some photos have no embedded date at all. **Scans and screenshots** carry no EXIF, so the
+file's own timestamp is the only date that ever existed — and if that was lost on the way
+in, the stored copy cannot be repaired from itself. The information is not in the bytes.
+
+It is still in the originals, so point at them:
+
+```bash
+python3 -m photovault redate --from ~/Scans/certificates --apply
+```
+
+Files are matched by **content hash**, not by name, so a file that merely looks similar
+can never hand its date to the wrong photo. Embedded metadata still wins where it exists;
+the file timestamp is only used when there is nothing else.
 
 **Plain folders and original filenames-by-date.** If PhotoVault disappeared tomorrow,
 your photos are still just files in dated folders. Any tool can read them. A backup
@@ -1011,7 +1030,7 @@ made of.*
 PYTHONPATH="$PWD:$PWD/tests" python3 -m unittest discover -s tests -v
 ```
 
-216 tests covering ingest, deduplication, replication, corruption repair, catalog
+220 tests covering ingest, deduplication, replication, corruption repair, catalog
 rebuild, total loss of the primary device, the HTTP API, background jobs, and
 path-traversal defence, multi-drive identity safety, sharded placement, the delete path, inbox watching, config round-tripping, reclaim safety, launcher preflight, duplicate review, upload path safety, the trash lifecycle, catalog backup and restore, the operations catalogue, the Immich integration against a stub server, and Immich backup artifacts.
 

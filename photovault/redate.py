@@ -69,6 +69,62 @@ def embedded_date(path: Path, ext: str) -> tuple[datetime | None, str]:
     return None, ""
 
 
+def find_from_originals(cfg: Config, catalog: Catalog, folder: Path,
+                        *, limit: int | None = None) -> RedateReport:
+    """Recover dates from a folder of original files, matched by content.
+
+    Some photos have no embedded date at all - scans and screenshots in
+    particular - so the file's own timestamp is the only date that ever
+    existed. If that was lost on the way in, the stored copy cannot be
+    repaired from itself: the information is simply not in the bytes.
+
+    It is still in the originals, though, and content hashing makes the join
+    exact. Every file here is matched by hash, so a file that merely looks
+    similar can never contribute a date to the wrong photo.
+    """
+    from .hashing import hash_file
+    from .ingest import WANTED_EXT, iter_media
+    from .mediatime import normalize_ext
+
+    report = RedateReport()
+    weak = {r["hash"]: r for r in catalog.db.execute(
+        "SELECT hash, rel_path, ext, captured_at, time_source FROM asset "
+        f"WHERE time_source IN ({','.join('?' * len(WEAK_SOURCES))}) "
+        "AND deleted_at IS NULL", WEAK_SOURCES).fetchall()}
+
+    for path in iter_media(folder):
+        if normalize_ext(path) not in WANTED_EXT:
+            continue
+        report.examined += 1
+        try:
+            digest, _ = hash_file(path)
+        except OSError:
+            continue
+        row = weak.get(digest)
+        if row is None:
+            continue
+
+        when, label = embedded_date(path, row["ext"])
+        if when is None:
+            try:
+                when, label = datetime.fromtimestamp(path.stat().st_mtime), "mtime"
+            except OSError:
+                continue
+        if not _plausible(when):
+            continue
+
+        new_rel = canonical_rel_path(digest, row["ext"], when, catalog)
+        if new_rel == row["rel_path"]:
+            report.unchanged += 1
+            continue
+        report.candidates.append(Candidate(
+            hash=digest, old_path=row["rel_path"], new_path=new_rel,
+            old_when=row["captured_at"], new_when=when, source=label))
+        if limit and len(report.candidates) >= limit:
+            break
+    return report
+
+
 def find(cfg: Config, catalog: Catalog, *, limit: int | None = None) -> RedateReport:
     """Which photos have a better date available than the one on record?"""
     report = RedateReport()
